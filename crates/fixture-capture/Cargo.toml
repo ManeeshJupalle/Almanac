@@ -1,0 +1,25 @@
+[package]
+name = "fixture-capture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Phase 1 tool: minimal OAuth + raw payload capture into ./fixtures. Not part of the app."
+
+[[bin]]
+name = "fixture-capture"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.103"
+base64 = "0.22.1"
+chrono = "0.4.45"
+dotenvy = "0.15.7"
+rand = "0.8"
+regex = "1.13.0"
+reqwest = { version = "0.13.4", features = ["form"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
+sha2 = "0.11.0"
+tokio = { version = "1.52.3", features = ["macros", "rt", "net", "time"] }
+url = "2.5.8"
+webbrowser = "1.2.1"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

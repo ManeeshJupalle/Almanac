@@ -1,0 +1,17 @@
+{
+  "kind": "calendar#events",
+  "etag": "\"p32ft3772sj0pa0o\"",
+  "summary": "[redacted]",
+  "description": "[redacted]",
+  "updated": "2026-07-08T00:07:49.526Z",
+  "timeZone": "America/Chicago",
+  "accessRole": "owner",
+  "defaultReminders": [
+    {
+      "method": "popup",
+      "minutes": 30
+    }
+  ],
+  "nextSyncToken": "CJ_RnOLkwZUDEJ_RnOLkwZUDGAUg36OVwgMo36OVwgM=",
+  "items": []
+}

@@ -1,0 +1,94 @@
+{
+  "kind": "calendar#events",
+  "etag": "\"p32ft3772sj0pa0o\"",
+  "summary": "[redacted]",
+  "description": "[redacted]",
+  "updated": "2026-07-08T00:07:49.526Z",
+  "timeZone": "America/Chicago",
+  "accessRole": "owner",
+  "defaultReminders": [
+    {
+      "method": "popup",
+      "minutes": 30
+    }
+  ],
+  "nextSyncToken": "CJ_RnOLkwZUDEJ_RnOLkwZUDGAUg36OVwgMo36OVwgM=",
+  "items": [
+    {
+      "kind": "calendar#event",
+      "etag": "\"3566224136349662\"",
+      "id": "vdgh2ak4uln8e5tbi2scj57444",
+      "status": "confirmed",
+      "htmlLink": "https://www.google.com/calendar/event?eid=REDACTED",
+      "created": "2026-07-03T20:44:50.000Z",
+      "updated": "2026-07-03T20:54:28.174Z",
+      "summary": "[redacted]",
+      "description": "[redacted]",
+      "location": "[redacted]",
+      "creator": {
+        "email": "redacted@example.com"
+      },
+      "organizer": {
+        "email": "redacted@example.com",
+        "displayName": "Redacted Name"
+      },
+      "start": {
+        "dateTime": "2026-07-08T13:00:00-05:00",
+        "timeZone": "America/New_York"
+      },
+      "end": {
+        "dateTime": "2026-07-08T13:20:00-05:00",
+        "timeZone": "America/New_York"
+      },
+      "iCalUID": "vdgh2ak4uln8e5tbi2scj57444@google.com",
+      "sequence": 0,
+      "attendees": [
+        {
+          "email": "redacted@example.com",
+          "self": true,
+          "responseStatus": "needsAction"
+        }
+      ],
+      "extendedProperties": {
+        "shared": {
+          "ashbyInterviewScheduleId": "367a2b5a-1170-4f8c-8db1-a777efd21f9b",
+          "isAshbyInvite": "true"
+        }
+      },
+      "hangoutLink": "https://meet.google.com/redacted",
+      "conferenceData": {
+        "entryPoints": [
+          {
+            "entryPointType": "video",
+            "uri": "https://redacted.example.com",
+            "label": "[redacted]"
+          },
+          {
+            "entryPointType": "more",
+            "uri": "https://redacted.example.com",
+            "pin": "[redacted]"
+          },
+          {
+            "regionCode": "US",
+            "entryPointType": "phone",
+            "uri": "https://redacted.example.com",
+            "label": "[redacted]",
+            "pin": "[redacted]"
+          }
+        ],
+        "conferenceSolution": {
+          "key": {
+            "type": "hangoutsMeet"
+          },
+          "name": "Google Meet",
+          "iconUri": "https://fonts.gstatic.com/s/i/productlogos/meet_2020q4/v6/web-512dp/logo_meet_2020q4_color_2x_web_512dp.png"
+        },
+        "conferenceId": "redacted"
+      },
+      "reminders": {
+        "useDefault": true
+      },
+      "eventType": "default"
+    }
+  ]
+}

@@ -1,0 +1,191 @@
+{
+  "id": "19f4f90ab07d8041",
+  "threadId": "19f4f90ab07d8041",
+  "labelIds": [
+    "UNREAD",
+    "CATEGORY_UPDATES",
+    "INBOX"
+  ],
+  "snippet": "[redacted]",
+  "payload": {
+    "partId": "",
+    "mimeType": "multipart/alternative",
+    "filename": "",
+    "headers": [
+      {
+        "name": "Delivered-To",
+        "value": "Redacted Sender <redacted@example.com>"
+      },
+      {
+        "name": "Received",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Received",
+        "value": "[redacted]"
+      },
+      {
+        "name": "ARC-Seal",
+        "value": "[redacted]"
+      },
+      {
+        "name": "ARC-Message-Signature",
+        "value": "[redacted]"
+      },
+      {
+        "name": "ARC-Authentication-Results",
+        "value": "[redacted]"
+      },
+      {
+        "name": "Return-Path",
+        "value": "Redacted Sender <redacted@example.com>"
+      },
+      {
+        "name": "Received",
+        "value": "[redacted]"
+      },
+      {
+        "name": "Received-SPF",
+        "value": "[redacted]"
+      },
+      {
+        "name": "Authentication-Results",
+        "value": "[redacted]"
+      },
+      {
+        "name": "DKIM-Signature",
+        "value": "[redacted]"
+      },
+      {
+        "name": "DKIM-Signature",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Mailgun-Sid",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Feedback-Id",
+        "value": "[redacted]"
+      },
+      {
+        "name": "Received",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Mailgun-Sending-Ip",
+        "value": "[redacted]"
+      },
+      {
+        "name": "Date",
+        "value": "Sat, 11 Jul 2026 05:05:07 +0000"
+      },
+      {
+        "name": "Mime-Version",
+        "value": "1.0"
+      },
+      {
+        "name": "Content-Type",
+        "value": "multipart/alternative; boundary=\"9bdcf9ec4a4364ddbd1072cca8715f001eeeaccac9a741091cd2312ed846\""
+      },
+      {
+        "name": "Subject",
+        "value": "[redacted subject]"
+      },
+      {
+        "name": "From",
+        "value": "Redacted Sender <redacted@example.com>"
+      },
+      {
+        "name": "To",
+        "value": "Redacted Sender <redacted@example.com>"
+      },
+      {
+        "name": "X-Mailgun-Native-Send",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Mailgun-Track-Clicks",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Mailgun-Track-Opens",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Mailgun-Dkim",
+        "value": "[redacted]"
+      },
+      {
+        "name": "List-Unsubscribe-Post",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Mailer",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Report-Abuse-To",
+        "value": "[redacted]"
+      },
+      {
+        "name": "List-Unsubscribe",
+        "value": "[redacted]"
+      },
+      {
+        "name": "X-Mailgun-Variables",
+        "value": "[redacted]"
+      },
+      {
+        "name": "Message-Id",
+        "value": "<redacted@example.com>"
+      }
+    ],
+    "body": {
+      "size": 0
+    },
+    "parts": [
+      {
+        "partId": "0",
+        "mimeType": "text/plain",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Content-Transfer-Encoding",
+            "value": "quoted-printable"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/plain; charset=\"utf-8\""
+          }
+        ],
+        "body": {
+          "size": 779,
+          "data": "W3JlZGFjdGVkXQ"
+        }
+      },
+      {
+        "partId": "1",
+        "mimeType": "text/html",
+        "filename": "",
+        "headers": [
+          {
+            "name": "Content-Transfer-Encoding",
+            "value": "quoted-printable"
+          },
+          {
+            "name": "Content-Type",
+            "value": "text/html; charset=\"utf-8\""
+          }
+        ],
+        "body": {
+          "size": 18473,
+          "data": "W3JlZGFjdGVkXQ"
+        }
+      }
+    ]
+  },
+  "sizeEstimate": 29011,
+  "historyId": "12075797",
+  "internalDate": "1783746307000"
+}

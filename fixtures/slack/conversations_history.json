@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "messages": [
+    {
+      "subtype": "channel_join",
+      "user": "U0BGKB60LH3",
+      "text": "[redacted]",
+      "type": "message",
+      "ts": "1783745960.543929"
+    }
+  ],
+  "has_more": false,
+  "pin_count": 0,
+  "channel_actions_ts": null,
+  "channel_actions_count": 0
+}
