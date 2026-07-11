@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// A single schema migration, embedded at compile time.
 pub struct Migration {
@@ -22,6 +22,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "extraction",
         sql: include_str!("../migrations/0002_extraction.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "briefings",
+        sql: include_str!("../migrations/0003_briefings.sql"),
     },
 ];
 
@@ -161,6 +166,133 @@ pub fn briefing_inputs(
     Ok(items)
 }
 
+/// A briefing as read back from the local store. Deep links come from an
+/// INNER JOIN on source_objects — an item that does not resolve cannot be
+/// loaded, so the UI can never render ungrounded provenance.
+#[derive(Debug)]
+pub struct StoredBriefing {
+    pub id: i64,
+    pub briefing_date: chrono::NaiveDate,
+    pub backend_id: String,
+    pub rationale: String,
+    pub created_at: String,
+    pub items: Vec<StoredBriefingItem>,
+}
+
+#[derive(Debug)]
+pub struct StoredBriefingItem {
+    pub position: i64,
+    pub kind: crate::extract::ItemKind,
+    pub summary: String,
+    pub occurred_at: chrono::DateTime<chrono::Utc>,
+    pub provenance: crate::types::ProvenanceRef,
+}
+
+/// Persist a validated briefing (transactional; FK enforces grounding).
+pub fn insert_briefing(
+    conn: &mut Connection,
+    briefing_date: chrono::NaiveDate,
+    backend_id: &str,
+    briefing: &crate::synth::Briefing,
+) -> Result<i64> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO briefings (briefing_date, backend_id, rationale) VALUES (?1, ?2, ?3)",
+        (briefing_date.to_string(), backend_id, &briefing.rationale),
+    )?;
+    let briefing_id = tx.last_insert_rowid();
+    for (position, item) in briefing.sequence.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO briefing_items
+                 (briefing_id, position, source, native_id, kind, summary, occurred_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (
+                briefing_id,
+                position as i64,
+                item.provenance.source.to_string(),
+                &item.provenance.native_id,
+                item.kind.as_str(),
+                &item.summary,
+                item.occurred_at.to_rfc3339(),
+            ),
+        )
+        .context("persisting briefing item (FK failure here means ungrounded provenance)")?;
+    }
+    tx.commit()?;
+    Ok(briefing_id)
+}
+
+/// Most recently created briefing, if any.
+pub fn latest_briefing(conn: &Connection) -> Result<Option<StoredBriefing>> {
+    let head = conn
+        .query_row(
+            "SELECT id, briefing_date, backend_id, rationale, created_at
+             FROM briefings ORDER BY id DESC LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((id, date, backend_id, rationale, created_at)) = head else {
+        return Ok(None);
+    };
+
+    let mut stmt = conn.prepare(
+        "SELECT bi.position, bi.kind, bi.summary, bi.occurred_at,
+                bi.source, bi.native_id, so.deep_link
+         FROM briefing_items bi
+         JOIN source_objects so
+           ON so.source = bi.source AND so.native_id = bi.native_id
+         WHERE bi.briefing_id = ?1
+         ORDER BY bi.position ASC",
+    )?;
+    let rows = stmt.query_map([id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        let (position, kind, summary, occurred_at, source, native_id, deep_link) = row?;
+        items.push(StoredBriefingItem {
+            position,
+            kind: crate::extract::ItemKind::parse(&kind)
+                .with_context(|| format!("unknown kind '{kind}' in briefing_items"))?,
+            summary,
+            occurred_at: chrono::DateTime::parse_from_rfc3339(&occurred_at)?
+                .with_timezone(&chrono::Utc),
+            provenance: crate::types::ProvenanceRef {
+                source: crate::types::SourceId::parse(&source)
+                    .with_context(|| format!("unknown source '{source}' in briefing_items"))?,
+                native_id,
+                deep_link,
+            },
+        });
+    }
+    Ok(Some(StoredBriefing {
+        id,
+        briefing_date: date.parse()?,
+        backend_id,
+        rationale,
+        created_at,
+        items,
+    }))
+}
+
 /// (kind, count) rows for reporting.
 pub fn count_items_by_kind(conn: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn
@@ -232,6 +364,8 @@ mod tests {
         assert_eq!(
             tables,
             vec![
+                "briefing_items".to_string(),
+                "briefings".to_string(),
                 "extracted_items".to_string(),
                 "schema_migrations".to_string(),
                 "source_objects".to_string(),

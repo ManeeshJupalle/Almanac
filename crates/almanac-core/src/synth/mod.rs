@@ -13,7 +13,7 @@
 
 pub mod local_llm;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{ensure, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use rusqlite::Connection;
@@ -158,27 +158,21 @@ pub fn build_digest(items: &[ExtractedItem]) -> String {
         .join("\n")
 }
 
-#[derive(Debug, PartialEq)]
-pub struct ParsedPlan {
-    /// 1-based digest indexes, a permutation of 1..=n.
-    pub order: Vec<usize>,
-    pub rationale: String,
-}
-
-/// Strict parser for the model's reply. Anything that is not a permutation
-/// of 1..=n with a non-empty rationale is an error — the caller may retry
-/// once and must otherwise fail the synthesis.
-pub fn parse_plan(reply: &str, n_items: usize) -> Result<ParsedPlan> {
+/// Strict parser for the model's ORDER reply. Anything that is not a
+/// permutation of 1..=n is an error — the caller may retry once and must
+/// otherwise fail the synthesis.
+///
+/// Small local models sometimes echo digest text after the numbers
+/// ("ORDER: 1. [event at 18:00 UTC] …"). Only tokens that parse fully as
+/// integers are kept — safety is unchanged because the permutation check
+/// still requires exactly 1..=n, each exactly once.
+pub fn parse_order(reply: &str, n_items: usize) -> Result<Vec<usize>> {
     let order_line = reply
         .lines()
         .map(str::trim)
         .find_map(|l| l.strip_prefix("ORDER:").or_else(|| l.strip_prefix("Order:")))
         .context("reply has no ORDER: line")?;
 
-    // Small local models sometimes echo digest text after the numbers
-    // ("ORDER: 1. [event at 18:00 UTC] …"). Keep only tokens that parse
-    // fully as integers — safety is unchanged because the permutation check
-    // below still requires exactly 1..=n, each exactly once.
     let order: Vec<usize> = order_line
         .split([',', ' '])
         .map(|t| t.trim().trim_end_matches(['.', ')', ':']))
@@ -196,21 +190,67 @@ pub fn parse_plan(reply: &str, n_items: usize) -> Result<ParsedPlan> {
         ensure!(!seen[idx - 1], "ORDER lists item {idx} more than once");
         seen[idx - 1] = true;
     }
+    Ok(order)
+}
 
-    let rationale = match reply.split_once("RATIONALE:").or_else(|| reply.split_once("Rationale:")) {
-        Some((_, r)) => r.trim().to_string(),
-        None => bail!("reply has no RATIONALE: line"),
-    };
-    ensure!(!rationale.is_empty(), "RATIONALE is empty");
+/// Deterministic, legible rationale built from REAL signals of the chosen
+/// sequence (Phase 5 decision: the model picks the order; the "why" text is
+/// templated — no model prose, no garble).
+pub fn templated_rationale(sequence: &[PlannedItem]) -> String {
+    let events: Vec<&PlannedItem> =
+        sequence.iter().filter(|i| i.kind == ItemKind::Event).collect();
+    let actions = sequence.iter().filter(|i| i.kind == ItemKind::ActionNeeded).count();
+    let commitments = sequence.iter().filter(|i| i.kind == ItemKind::Commitment).count();
 
-    Ok(ParsedPlan { order, rationale })
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut composition = Vec::new();
+    if !events.is_empty() {
+        composition.push(format!("{} timed event{}", events.len(), plural(events.len())));
+    }
+    if actions > 0 {
+        composition.push(format!("{actions} action item{}", plural(actions)));
+    }
+    if commitments > 0 {
+        composition.push(format!("{commitments} commitment{}", plural(commitments)));
+    }
+
+    let mut sentences = vec![format!(
+        "{} item{} briefed: {}.",
+        sequence.len(),
+        plural(sequence.len()),
+        composition.join(", ")
+    )];
+    if !events.is_empty() {
+        let times = events
+            .iter()
+            .map(|e| format!("{:02}:{:02}", e.occurred_at.hour(), e.occurred_at.minute()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sentences.push(format!("Timed events hold their scheduled slots ({times} UTC)."));
+    }
+    if let Some(first_event_pos) = sequence.iter().position(|i| i.kind == ItemKind::Event) {
+        let early = sequence[..first_event_pos]
+            .iter()
+            .filter(|i| i.kind == ItemKind::ActionNeeded || i.kind == ItemKind::Commitment)
+            .count();
+        if early > 0 {
+            sentences.push(format!(
+                "{early} loose item{} front-loaded before the first event.",
+                plural(early)
+            ));
+        }
+    }
+    sentences
+        .push("Sequence chosen by the on-device model; every item links to its source.".into());
+    sentences.join(" ")
 }
 
 /// Assemble the briefing from OUR items in the model's chosen order —
-/// provenance is copied from the extracted items, never model-generated.
-pub fn briefing_from_plan(items: &[ExtractedItem], plan: ParsedPlan) -> Result<Briefing> {
-    let mut sequence = Vec::with_capacity(plan.order.len());
-    for idx in plan.order {
+/// provenance is copied from the extracted items, never model-generated;
+/// the rationale is templated from the resulting sequence.
+pub fn briefing_from_order(items: &[ExtractedItem], order: Vec<usize>) -> Result<Briefing> {
+    let mut sequence = Vec::with_capacity(order.len());
+    for idx in order {
         let item = items.get(idx - 1).context("plan index out of range")?;
         sequence.push(PlannedItem {
             provenance: item.provenance().clone(),
@@ -219,7 +259,8 @@ pub fn briefing_from_plan(items: &[ExtractedItem], plan: ParsedPlan) -> Result<B
             occurred_at: item.occurred_at(),
         });
     }
-    Ok(Briefing { sequence, rationale: plan.rationale })
+    let rationale = templated_rationale(&sequence);
+    Ok(Briefing { sequence, rationale })
 }
 
 #[cfg(test)]
@@ -227,30 +268,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_plan_accepts_a_valid_reply() {
-        let reply = "ORDER: 2, 1, 3\nRATIONALE: Meetings first, then the follow-ups.";
-        let plan = parse_plan(reply, 3).unwrap();
-        assert_eq!(plan.order, vec![2, 1, 3]);
-        assert!(plan.rationale.starts_with("Meetings"));
+    fn parse_order_accepts_a_valid_reply() {
+        assert_eq!(parse_order("ORDER: 2, 1, 3", 3).unwrap(), vec![2, 1, 3]);
     }
 
     #[test]
-    fn parse_plan_rejects_duplicates_missing_and_invented_items() {
-        assert!(parse_plan("ORDER: 1, 1, 2\nRATIONALE: x", 3).is_err(), "duplicate");
-        assert!(parse_plan("ORDER: 1, 2\nRATIONALE: x", 3).is_err(), "missing item");
-        assert!(parse_plan("ORDER: 1, 2, 4\nRATIONALE: x", 3).is_err(), "invented item");
-        assert!(parse_plan("ORDER: 1, 2, 3", 3).is_err(), "no rationale");
-        assert!(parse_plan("RATIONALE: x", 3).is_err(), "no order");
+    fn parse_order_rejects_duplicates_missing_and_invented_items() {
+        assert!(parse_order("ORDER: 1, 1, 2", 3).is_err(), "duplicate");
+        assert!(parse_order("ORDER: 1, 2", 3).is_err(), "missing item");
+        assert!(parse_order("ORDER: 1, 2, 4", 3).is_err(), "invented item");
+        assert!(parse_order("no order here", 3).is_err(), "no order line");
     }
 
     #[test]
-    fn parse_plan_survives_digest_echo_without_weakening_the_permutation_check() {
+    fn parse_order_survives_digest_echo_without_weakening_the_permutation_check() {
         // Seen live: single-item day, model echoed the digest line.
-        let echo = "ORDER: 1. [event at 18:00 UTC] Interview loop\nRATIONALE: Only one item today.";
-        assert_eq!(parse_plan(echo, 1).unwrap().order, vec![1]);
+        let echo = "ORDER: 1. [event at 18:00 UTC] Interview loop";
+        assert_eq!(parse_order(echo, 1).unwrap(), vec![1]);
 
         // Echoed prose still cannot smuggle in a bad plan.
-        let bad = "ORDER: 1. [event at 18:00 UTC] x\nRATIONALE: y";
-        assert!(parse_plan(bad, 2).is_err(), "echo with missing item still rejected");
+        assert!(parse_order(echo, 2).is_err(), "echo with missing item still rejected");
+    }
+
+    #[test]
+    fn templated_rationale_states_real_signals_only() {
+        let mk = |kind, at: &str| PlannedItem {
+            provenance: crate::types::ProvenanceRef {
+                source: crate::types::SourceId::Slack,
+                native_id: "1.1".into(),
+                deep_link: "https://example.slack.com/archives/C1/p11".into(),
+            },
+            kind,
+            summary: "x".into(),
+            occurred_at: at.parse().unwrap(),
+        };
+        let seq = vec![
+            mk(ItemKind::ActionNeeded, "2026-07-11T08:00:00Z"),
+            mk(ItemKind::Event, "2026-07-11T09:30:00Z"),
+            mk(ItemKind::Commitment, "2026-07-11T07:45:00Z"),
+            mk(ItemKind::Event, "2026-07-11T16:00:00Z"),
+        ];
+        let r = templated_rationale(&seq);
+        assert!(r.contains("4 items briefed"), "{r}");
+        assert!(r.contains("2 timed events"), "{r}");
+        assert!(r.contains("09:30, 16:00 UTC"), "{r}");
+        assert!(r.contains("1 loose item front-loaded"), "{r}");
+        assert!(r.contains("on-device model"), "{r}");
     }
 }

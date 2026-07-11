@@ -5,7 +5,7 @@ use almanac_core::adapters::{
 };
 use almanac_core::auth::{GoogleAuth, SlackAuth};
 use almanac_core::types::TimeWindow;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
 
 fn main() -> ExitCode {
@@ -20,6 +20,28 @@ fn main() -> ExitCode {
         Some("extract-live") => block_on(extract_live()),
         Some("synthesize") => block_on(synthesize(args.get(1).cloned())),
         Some("e2e-fixtures") => block_on(e2e_fixtures()),
+        Some("db-dump") => db_dump(),
+        Some("slack-permalink") => block_on(slack_permalink(args.get(1).cloned(), args.get(2).cloned())),
+        Some("live-briefing") => block_on(async {
+            let stored = almanac_core::live_briefing().await?;
+            println!(
+                "live briefing for {} ({} items) persisted; backend {}",
+                stored.briefing_date,
+                stored.items.len(),
+                stored.backend_id
+            );
+            for item in &stored.items {
+                println!(
+                    "  {}. [{}] {} -> {}",
+                    item.position + 1,
+                    item.kind.as_str(),
+                    item.summary,
+                    item.provenance.deep_link
+                );
+            }
+            println!("  why: {}", stored.rationale);
+            Ok(())
+        }),
         _ => {
             eprintln!(
                 "usage: almanac-core <--self-check|smoke-adapters|refresh-google|refresh-slack|extract-fixtures|extract-live|synthesize [YYYY-MM-DD]|e2e-fixtures>"
@@ -131,7 +153,7 @@ fn extract_fixtures() -> Result<()> {
         println!("network: UNREACHABLE — offline run confirmed");
     }
 
-    let model_dir = std::path::Path::new("models").join("minilm");
+    let model_dir = almanac_core::models_dir()?.join("minilm");
     let started = std::time::Instant::now();
     let extractor = almanac_core::extract::Extractor::with_model(&model_dir)?;
     println!("model loaded from {} in {:?} (local files only)", model_dir.display(), started.elapsed());
@@ -163,6 +185,64 @@ fn extract_fixtures() -> Result<()> {
     Ok(())
 }
 
+/// Diagnostic: compare our constructed Slack deep link against Slack's own
+/// canonical permalink from chat.getPermalink (grounding verification).
+async fn slack_permalink(channel: Option<String>, ts: Option<String>) -> Result<()> {
+    let (channel, ts) = (
+        channel.context("usage: slack-permalink <channel_id> <ts>")?,
+        ts.context("usage: slack-permalink <channel_id> <ts>")?,
+    );
+    let auth = SlackAuth::from_env()?;
+    let token = auth.user_token()?;
+    let ours = almanac_core::adapters::slack::deep_link(&auth.workspace_url().await?, &channel, &ts);
+
+    let mut url = url::Url::parse("https://slack.com/api/chat.getPermalink")?;
+    url.query_pairs_mut().append_pair("channel", &channel).append_pair("message_ts", &ts);
+    let resp = reqwest::Client::new().get(url).bearer_auth(&token).send().await?;
+    let v: serde_json::Value = serde_json::from_str(&resp.text().await?)?;
+    if v.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        anyhow::bail!(
+            "chat.getPermalink failed: {}",
+            v.get("error").and_then(serde_json::Value::as_str).unwrap_or("unknown_error")
+        );
+    }
+    let canonical = v.get("permalink").and_then(serde_json::Value::as_str).unwrap_or("");
+    println!("constructed: {ours}");
+    println!("canonical:   {canonical}");
+    println!("match: {}", ours == canonical);
+    Ok(())
+}
+
+/// Diagnostic: recent extracted items and stored briefings (local console
+/// only; summaries are local distillates and never leave the machine).
+fn db_dump() -> Result<()> {
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let mut stmt = conn.prepare(
+        "SELECT ei.source, ei.native_id, ei.kind, ei.summary, so.occurred_at, ei.signals_json
+         FROM extracted_items ei
+         JOIN source_objects so ON so.source = ei.source AND so.native_id = ei.native_id
+         WHERE ei.id = (SELECT MAX(id) FROM extracted_items
+                        WHERE source = ei.source AND native_id = ei.native_id)
+         ORDER BY so.occurred_at DESC LIMIT 40",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    })?;
+    println!("latest extraction per source object (newest first, max 40):");
+    for row in rows {
+        let (source, native_id, kind, summary, occurred_at, signals) = row?;
+        println!("  {occurred_at} [{kind:>13}] {source}:{native_id} — {summary} | {signals}");
+    }
+    Ok(())
+}
+
 fn print_briefing(briefing: &almanac_core::synth::Briefing, elapsed: std::time::Duration) {
     println!("briefing (synthesis took {elapsed:?}):");
     for (i, item) in briefing.sequence.iter().enumerate() {
@@ -190,16 +270,23 @@ async fn synthesize(date_arg: Option<String>) -> Result<()> {
         None => Utc::now().date_naive(),
     };
     let backend = almanac_core::synth::local_llm::LocalLlmBackend::load(
-        &std::path::Path::new("models").join("qwen2.5-0.5b-instruct"),
+        &almanac_core::models_dir()?.join("qwen2.5-0.5b-instruct"),
     )?;
     println!("backend: {}", almanac_core::synth::SynthesisBackend::backend_id(&backend));
 
     let db_path = almanac_core::init_default_db()?;
-    let conn = almanac_core::db::open(&db_path)?;
+    let mut conn = almanac_core::db::open(&db_path)?;
     let ctx = almanac_core::synth::DayContext { date, now: Utc::now() };
     let started = std::time::Instant::now();
     let briefing = almanac_core::synth::generate_briefing(&conn, &backend, ctx).await?;
+    almanac_core::db::insert_briefing(
+        &mut conn,
+        date,
+        almanac_core::synth::SynthesisBackend::backend_id(&backend),
+        &briefing,
+    )?;
     print_briefing(&briefing, started.elapsed());
+    println!("briefing persisted to SQLite");
     Ok(())
 }
 
@@ -213,13 +300,12 @@ async fn e2e_fixtures() -> Result<()> {
     }
 
     // Extraction (MiniLM, local files).
-    let extractor = almanac_core::extract::Extractor::with_model(
-        &std::path::Path::new("models").join("minilm"),
-    )?;
+    let models = almanac_core::models_dir()?;
+    let extractor = almanac_core::extract::Extractor::with_model(&models.join("minilm"))?;
     let objects = fixture_source_objects()?;
     let items = extractor.extract(&objects)?;
     let db_path = almanac_core::init_default_db()?;
-    let conn = almanac_core::db::open(&db_path)?;
+    let mut conn = almanac_core::db::open(&db_path)?;
     for (obj, item) in objects.iter().zip(&items) {
         almanac_core::db::insert_source_object(&conn, obj)?;
         almanac_core::db::insert_extracted_item(&conn, item)?;
@@ -241,21 +327,28 @@ async fn e2e_fixtures() -> Result<()> {
 
     // Synthesis (Qwen, local files) + grounding validation.
     let backend = almanac_core::synth::local_llm::LocalLlmBackend::load(
-        &std::path::Path::new("models").join("qwen2.5-0.5b-instruct"),
+        &models.join("qwen2.5-0.5b-instruct"),
     )?;
     let ctx = almanac_core::synth::DayContext { date, now: Utc::now() };
     let started = std::time::Instant::now();
     let briefing = almanac_core::synth::generate_briefing(&conn, &backend, ctx).await?;
+    almanac_core::db::insert_briefing(
+        &mut conn,
+        date,
+        almanac_core::synth::SynthesisBackend::backend_id(&backend),
+        &briefing,
+    )?;
     print_briefing(&briefing, started.elapsed());
-    println!("grounding validation: PASSED (briefing was accepted)");
+    println!("grounding validation: PASSED (briefing was accepted); persisted to SQLite");
     Ok(())
 }
 
 /// Live smoke: adapters → extraction → SQLite. Not the test basis.
 async fn extract_live() -> Result<()> {
     let window = TimeWindow { start: Utc::now() - Duration::days(7), end: Utc::now() };
-    let extractor =
-        almanac_core::extract::Extractor::with_model(&std::path::Path::new("models").join("minilm"))?;
+    let extractor = almanac_core::extract::Extractor::with_model(
+        &almanac_core::models_dir()?.join("minilm"),
+    )?;
 
     let mut objects = Vec::new();
     let mut gmail = GmailAdapter::from_env()?;

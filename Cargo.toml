@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/almanac-core", "crates/fixture-capture", "src-tauri"]
+
+# Model inference lives in dependency crates (candle, tract). Compile deps
+# optimized even in dev so `tauri dev` synthesis runs at release-like speed;
+# workspace crates stay unoptimized for fast iteration.
+[profile.dev.package."*"]
+opt-level = 3

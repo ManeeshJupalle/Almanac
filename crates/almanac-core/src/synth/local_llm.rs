@@ -14,7 +14,7 @@ use candle_transformers::models::quantized_qwen2::ModelWeights;
 use chrono::Datelike;
 
 use super::{
-    briefing_from_plan, build_digest, parse_plan, Briefing, DayContext, SynthesisBackend,
+    briefing_from_order, build_digest, parse_order, Briefing, DayContext, SynthesisBackend,
 };
 use crate::extract::ExtractedItem;
 
@@ -110,10 +110,9 @@ impl LocalLlmBackend {
             "Today is {weekday}, {date}. These are today's items, numbered:\n{digest}\n\n\
              Order ALL {n} items into the best sequence for the day. Keep scheduled events in \
              time order; put urgent actions before loose commitments.\n\
-             Reply with exactly two lines and nothing else. The ORDER line contains ONLY \
-             numbers, like this (in your chosen order):\n\
-             ORDER: {example}\n\
-             RATIONALE: two to four plain sentences explaining why this order",
+             Reply with EXACTLY ONE line and nothing else, containing only numbers \
+             (in your chosen order):\n\
+             ORDER: {example}",
             weekday = ctx.date.weekday(),
             date = ctx.date,
         );
@@ -137,8 +136,8 @@ impl SynthesisBackend for LocalLlmBackend {
         for _attempt in 0..2 {
             let prompt = Self::chat_prompt(&Self::task_text(&items, ctx, correction.as_deref()));
             let reply = self.generate(&prompt)?;
-            match parse_plan(&reply, items.len()) {
-                Ok(plan) => return briefing_from_plan(&items, plan),
+            match parse_order(&reply, items.len()) {
+                Ok(order) => return briefing_from_order(&items, order),
                 Err(err) => correction = Some(format!("{err:#}")),
             }
         }
