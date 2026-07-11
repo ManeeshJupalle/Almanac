@@ -16,11 +16,14 @@ pub struct Migration {
 }
 
 /// Ordered, append-only list of all migrations.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "init",
-    sql: include_str!("../migrations/0001_init.sql"),
-}];
+pub const MIGRATIONS: &[Migration] = &[
+    Migration { version: 1, name: "init", sql: include_str!("../migrations/0001_init.sql") },
+    Migration {
+        version: 2,
+        name: "extraction",
+        sql: include_str!("../migrations/0002_extraction.sql"),
+    },
+];
 
 /// Open the database at `path`, creating parent directories and the file on
 /// first run.
@@ -63,6 +66,57 @@ pub fn migrate(conn: &mut Connection) -> Result<usize> {
     Ok(applied_now)
 }
 
+/// Store a fetched source object locally (raw stays on this machine — the
+/// serialization here targets the local SQLite file only, via the deliberate
+/// `RawContent::as_json()` accessor).
+pub fn insert_source_object(conn: &Connection, obj: &crate::types::SourceObject) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO source_objects
+             (source, native_id, deep_link, occurred_at, raw_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (
+            obj.provenance.source.to_string(),
+            &obj.provenance.native_id,
+            &obj.provenance.deep_link,
+            obj.occurred_at.to_rfc3339(),
+            serde_json::to_string(obj.raw.as_json())?,
+        ),
+    )?;
+    Ok(())
+}
+
+/// Persist an extracted item. The composite FOREIGN KEY to source_objects
+/// makes this FAIL LOUDLY for any item whose provenance does not resolve to
+/// a stored source object — the grounding invariant, enforced at rest.
+pub fn insert_extracted_item(
+    conn: &Connection,
+    item: &crate::extract::ExtractedItem,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO extracted_items (source, native_id, kind, summary, signals_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (
+            item.provenance().source.to_string(),
+            &item.provenance().native_id,
+            item.kind().as_str(),
+            item.summary(),
+            serde_json::to_string(item.signals())?,
+        ),
+    )
+    .context("persisting extracted item (a foreign-key failure here means ungrounded provenance)")?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// (kind, count) rows for reporting.
+pub fn count_items_by_kind(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn
+        .prepare("SELECT kind, COUNT(*) FROM extracted_items GROUP BY kind ORDER BY kind")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<(String, i64)>>>()?;
+    Ok(rows)
+}
+
 /// Versions recorded in `schema_migrations`, ascending.
 pub fn applied_versions(conn: &Connection) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
@@ -103,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn phase0_schema_has_no_domain_tables() {
+    fn schema_matches_applied_migrations() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut conn = open(&dir.path().join("almanac.db")).expect("open");
         migrate(&mut conn).expect("migrate");
@@ -121,6 +175,13 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .expect("collect");
 
-        assert_eq!(tables, vec!["schema_migrations".to_string()]);
+        assert_eq!(
+            tables,
+            vec![
+                "extracted_items".to_string(),
+                "schema_migrations".to_string(),
+                "source_objects".to_string(),
+            ]
+        );
     }
 }

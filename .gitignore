@@ -13,6 +13,9 @@ dist-ssr
 src-tauri/target
 src-tauri/gen
 
+# On-device model files (fetched once; see README) — too big for git
+models/
+
 # Local database & anything with real data
 *.db
 *.db-journal

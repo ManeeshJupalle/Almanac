@@ -7,6 +7,7 @@
 pub mod adapters;
 pub mod auth;
 pub mod db;
+pub mod extract;
 pub mod types;
 
 use std::path::PathBuf;
