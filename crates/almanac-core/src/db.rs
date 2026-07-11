@@ -112,14 +112,35 @@ pub fn insert_extracted_item(
     Ok(conn.last_insert_rowid())
 }
 
-/// Briefing inputs for a UTC day — the run-scoping rule (Phase 4):
-/// for every (source, native_id) only the LATEST extraction (max rowid)
-/// counts, so re-running extraction never yields stale or duplicate items;
-/// selection is restricted to source objects whose occurred_at falls on the
-/// given UTC date. Ordered by occurrence time.
-pub fn briefing_inputs(
+/// UTC bounds of a calendar day in an arbitrary timezone (Phase 6: briefing
+/// days are the USER'S local day, not UTC). Generic over TimeZone so tests
+/// can pin fixed offsets and real DST-observing zones.
+pub fn day_bounds<Tz: chrono::TimeZone>(
+    date: chrono::NaiveDate,
+    tz: &Tz,
+) -> Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+    let midnight = |d: chrono::NaiveDate| -> Result<chrono::DateTime<chrono::Utc>> {
+        let naive = d.and_hms_opt(0, 0, 0).context("invalid midnight")?;
+        // DST can make local midnight ambiguous or nonexistent; earliest()
+        // picks the first valid instant, matching user intuition of "the
+        // start of the day".
+        let local = tz
+            .from_local_datetime(&naive)
+            .earliest()
+            .with_context(|| format!("no valid local midnight for {d}"))?;
+        Ok(local.with_timezone(&chrono::Utc))
+    };
+    Ok((midnight(date)?, midnight(date.succ_opt().context("date overflow")?)?))
+}
+
+/// Briefing inputs for a half-open UTC range [start, end) — the run-scoping
+/// rule (Phase 4): for every (source, native_id) only the LATEST extraction
+/// (max rowid) counts, so re-running extraction never yields stale or
+/// duplicate items. Ordered by occurrence time.
+pub fn briefing_inputs_range(
     conn: &Connection,
-    day_utc: chrono::NaiveDate,
+    start_utc: chrono::DateTime<chrono::Utc>,
+    end_utc: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<crate::extract::ExtractedItem>> {
     let mut stmt = conn.prepare(
         "SELECT ei.source, ei.native_id, ei.kind, ei.summary, ei.signals_json,
@@ -127,12 +148,13 @@ pub fn briefing_inputs(
          FROM extracted_items ei
          JOIN source_objects so
            ON so.source = ei.source AND so.native_id = ei.native_id
-         WHERE date(so.occurred_at) = ?1
+         WHERE datetime(so.occurred_at) >= datetime(?1)
+           AND datetime(so.occurred_at) < datetime(?2)
            AND ei.id = (SELECT MAX(id) FROM extracted_items
                         WHERE source = ei.source AND native_id = ei.native_id)
          ORDER BY so.occurred_at ASC, ei.native_id ASC",
     )?;
-    let rows = stmt.query_map([day_utc.to_string()], |row| {
+    let rows = stmt.query_map([start_utc.to_rfc3339(), end_utc.to_rfc3339()], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -164,6 +186,26 @@ pub fn briefing_inputs(
         )?);
     }
     Ok(items)
+}
+
+/// Raw payload of a stored source object (LOCAL read only — used by the
+/// cross-source dedup to inspect calendar-notification emails on-device).
+pub fn source_raw_json(
+    conn: &Connection,
+    source: crate::types::SourceId,
+    native_id: &str,
+) -> Result<Option<serde_json::Value>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT raw_json FROM source_objects WHERE source = ?1 AND native_id = ?2",
+            (source.to_string(), native_id),
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match raw {
+        Some(s) => Some(serde_json::from_str(&s)?),
+        None => None,
+    })
 }
 
 /// A briefing as read back from the local store. Deep links come from an

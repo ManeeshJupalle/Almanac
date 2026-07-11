@@ -55,20 +55,25 @@ pub trait SynthesisBackend {
 
 // ----------------------------------------------------------- pipeline ------
 
-/// Generate a validated briefing for `ctx.date`.
+/// Generate a validated briefing for `ctx.date`, interpreted as the USER'S
+/// LOCAL calendar day (Phase 6).
 ///
-/// Run-scoping: inputs come from `db::briefing_inputs` — for each
+/// Run-scoping: inputs come from `db::briefing_inputs_range` — for each
 /// (source, native_id) only the LATEST extraction (max rowid) is selected,
-/// restricted to source objects whose occurred_at falls on the UTC day.
-/// Noise items are excluded from synthesis but counted in the rationale.
+/// restricted to the local day's UTC bounds. Noise items are excluded from
+/// synthesis but counted in the rationale; cross-source duplicates
+/// (calendar-notification emails shadowing their own events) are suppressed
+/// from selection only — everything stays stored and auditable.
 pub async fn generate_briefing(
     conn: &Connection,
     backend: &dyn SynthesisBackend,
     ctx: DayContext,
 ) -> Result<Briefing> {
-    let inputs = crate::db::briefing_inputs(conn, ctx.date)?;
+    let (start, end) = crate::db::day_bounds(ctx.date, &chrono::Local)?;
+    let inputs = crate::db::briefing_inputs_range(conn, start, end)?;
     let (noise, actionable): (Vec<_>, Vec<_>) =
         inputs.into_iter().partition(|i| i.kind() == ItemKind::Noise);
+    let (actionable, suppressed) = dedup_calendar_email_duplicates(conn, actionable)?;
 
     let mut briefing = if actionable.is_empty() {
         Briefing {
@@ -84,6 +89,13 @@ pub async fn generate_briefing(
         briefing
     };
 
+    if suppressed > 0 {
+        briefing.rationale.push_str(&format!(
+            " ({suppressed} calendar-notification email{} suppressed as duplicate{} of briefed events.)",
+            if suppressed == 1 { "" } else { "s" },
+            if suppressed == 1 { "" } else { "s" },
+        ));
+    }
     if !noise.is_empty() {
         briefing.rationale.push_str(&format!(
             " ({} low-signal item{} classified as noise — retained in the local store, not briefed.)",
@@ -92,6 +104,79 @@ pub async fn generate_briefing(
         ));
     }
     Ok(briefing)
+}
+
+/// Phase 6 cross-source dedup, deliberately HIGH-PRECISION (a wrong merge is
+/// worse than a duplicate). A Gmail item is suppressed from the selection
+/// only when BOTH hold:
+///   1. its From header is Google Calendar's notification sender, and
+///   2. its body references a briefed calendar event's id (the base64 `eid`
+///      token embedded in calendar-email links), or it is a pure agenda
+///      digest ("N events happening today/tomorrow") while calendar items
+///      are present in the same selection.
+/// Suppression affects briefing selection ONLY; both source objects and both
+/// extracted items stay stored. Returns (kept, suppressed_count).
+pub fn dedup_calendar_email_duplicates(
+    conn: &Connection,
+    items: Vec<ExtractedItem>,
+) -> Result<(Vec<ExtractedItem>, usize)> {
+    use base64::Engine as _;
+
+    let gcal_ids: Vec<&str> = items
+        .iter()
+        .filter(|i| i.provenance().source == crate::types::SourceId::GoogleCalendar)
+        .map(|i| i.provenance().native_id.as_str())
+        .collect();
+    if gcal_ids.is_empty() {
+        return Ok((items, 0));
+    }
+    // The `eid` in calendar-email links is base64("<event_id> <calendar>").
+    // The prefix that encodes "<event_id> " is a stable, searchable token.
+    let eid_tokens: Vec<String> = gcal_ids
+        .iter()
+        .map(|id| {
+            let bytes = format!("{id} ");
+            let full = base64::engine::general_purpose::STANDARD.encode(bytes.as_bytes());
+            full[..(bytes.len() / 3) * 4].to_string()
+        })
+        .collect();
+
+    let digest_re = regex::Regex::new(r"(?i)^\s*\d+\s+events?\s+happening\s+(today|tomorrow)")
+        .expect("digest regex compiles");
+
+    let mut kept = Vec::with_capacity(items.len());
+    let mut suppressed = 0usize;
+    for item in items {
+        let mut is_duplicate = false;
+        if item.provenance().source == crate::types::SourceId::Gmail {
+            if let Some(raw) =
+                crate::db::source_raw_json(conn, item.provenance().source, &item.provenance().native_id)?
+            {
+                let payload = raw.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                let from_calendar = crate::adapters::gmail::header_values(&payload, "From")
+                    .iter()
+                    .any(|v| v.contains("calendar-notification@google.com"));
+                if from_calendar {
+                    let body_text: String = crate::adapters::gmail::collect_body_parts(&payload)
+                        .into_iter()
+                        .map(|(_, bytes)| String::from_utf8_lossy(&bytes).into_owned())
+                        .collect();
+                    let references_briefed_event =
+                        eid_tokens.iter().any(|t| body_text.contains(t.as_str()));
+                    let is_agenda_digest = digest_re.is_match(item.summary());
+                    if references_briefed_event || is_agenda_digest {
+                        is_duplicate = true;
+                    }
+                }
+            }
+        }
+        if is_duplicate {
+            suppressed += 1;
+        } else {
+            kept.push(item);
+        }
+    }
+    Ok((kept, suppressed))
 }
 
 /// The grounding validation pass (NOT advisory). Rejects the briefing if any

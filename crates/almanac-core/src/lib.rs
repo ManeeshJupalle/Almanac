@@ -88,24 +88,26 @@ pub async fn live_briefing() -> Result<db::StoredBriefing> {
         db::insert_extracted_item(&conn, item)?;
     }
 
-    // Brief the most recent day that has a non-noise item.
-    let date: Option<String> = {
+    // Brief the most recent LOCAL day that has a non-noise item (Phase 6:
+    // day boundaries follow the user's timezone, not UTC).
+    let latest: Option<String> = {
         use rusqlite::OptionalExtension;
         conn.query_row(
-            "SELECT date(so.occurred_at)
+            "SELECT so.occurred_at
              FROM extracted_items ei
              JOIN source_objects so
                ON so.source = ei.source AND so.native_id = ei.native_id
              WHERE ei.kind != 'noise'
-             ORDER BY so.occurred_at DESC LIMIT 1",
+             ORDER BY datetime(so.occurred_at) DESC LIMIT 1",
             [],
             |row| row.get(0),
         )
         .optional()?
     };
-    let date: chrono::NaiveDate = date
-        .context("no non-noise items found in the last 7 days — nothing to brief")?
-        .parse()?;
+    let latest = latest.context("no non-noise items found in the last 7 days — nothing to brief")?;
+    let date = chrono::DateTime::parse_from_rfc3339(&latest)?
+        .with_timezone(&chrono::Local)
+        .date_naive();
 
     let backend = synth::local_llm::LocalLlmBackend::load(&models.join("qwen2.5-0.5b-instruct"))?;
     let ctx = synth::DayContext { date, now: chrono::Utc::now() };

@@ -21,6 +21,18 @@ fn main() -> ExitCode {
         Some("synthesize") => block_on(synthesize(args.get(1).cloned())),
         Some("e2e-fixtures") => block_on(e2e_fixtures()),
         Some("db-dump") => db_dump(),
+        // Test utility: makes the stored Google refresh token invalid so the
+        // expired-token UX (Google's 7-day testing-mode expiry) can be
+        // reproduced on demand. Back up tokens/ first.
+        Some("debug-expire-google-token") => (|| {
+            let auth = GoogleAuth::from_env()?;
+            let mut token = almanac_core::auth::load_token(&auth.token_path)?;
+            token["refresh_token"] = serde_json::Value::String("invalid-for-testing".into());
+            token["obtained_at_unix"] = serde_json::Value::from(0); // force refresh path
+            almanac_core::auth::save_token(&auth.token_path, &token)?;
+            println!("google token invalidated (refresh will now fail like an expired token)");
+            Ok(())
+        })(),
         Some("slack-permalink") => block_on(slack_permalink(args.get(1).cloned(), args.get(2).cloned())),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
@@ -238,7 +250,21 @@ fn db_dump() -> Result<()> {
     println!("latest extraction per source object (newest first, max 40):");
     for row in rows {
         let (source, native_id, kind, summary, occurred_at, signals) = row?;
-        println!("  {occurred_at} [{kind:>13}] {source}:{native_id} — {summary} | {signals}");
+        let mut from = String::new();
+        if source == "gmail" {
+            if let Some(raw) = almanac_core::db::source_raw_json(
+                &conn,
+                almanac_core::types::SourceId::Gmail,
+                &native_id,
+            )? {
+                let payload = raw.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+                from = almanac_core::adapters::gmail::header_values(&payload, "From")
+                    .first()
+                    .map(|s| format!(" | from: {s}"))
+                    .unwrap_or_default();
+            }
+        }
+        println!("  {occurred_at} [{kind:>13}] {source}:{native_id} — {summary}{from} | {signals}");
     }
     Ok(())
 }
@@ -267,7 +293,8 @@ async fn synthesize(date_arg: Option<String>) -> Result<()> {
     }
     let date = match date_arg {
         Some(d) => d.parse().map_err(|e| anyhow::anyhow!("bad date '{d}': {e}"))?,
-        None => Utc::now().date_naive(),
+        // Briefing days are LOCAL calendar days (Phase 6).
+        None => chrono::Local::now().date_naive(),
     };
     let backend = almanac_core::synth::local_llm::LocalLlmBackend::load(
         &almanac_core::models_dir()?.join("qwen2.5-0.5b-instruct"),

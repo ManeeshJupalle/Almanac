@@ -160,6 +160,14 @@ impl GoogleAuth {
         let status = resp.status();
         let body = resp.text().await?;
         if !status.is_success() {
+            // Testing-mode OAuth consent expires refresh tokens after 7 days;
+            // surface an actionable message instead of a bare status code.
+            if body.contains("invalid_grant") {
+                bail!(
+                    "Google token expired or revoked (testing-mode consent expires after \
+                     7 days) — reconnect with `cargo run -p fixture-capture -- google-auth`"
+                );
+            }
             bail!("Google token refresh failed ({status})");
         }
         let mut fresh: Value = serde_json::from_str(&body)?;

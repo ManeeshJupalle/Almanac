@@ -81,10 +81,22 @@ fn get_connection_status() -> Vec<SourceStatusView> {
         Ok(token) => {
             let scopes = token.get("scope").and_then(|v| v.as_str()).unwrap_or("");
             let has = |s: &str| scopes.contains(s);
+            // Testing-mode consent expires refresh tokens after ~7 days; if
+            // the last successful (re)issue is older, warn before compose
+            // fails. Honest hint, not a live probe.
+            let age_days = token
+                .get("obtained_at_unix")
+                .and_then(|v| v.as_i64())
+                .map(|t| (chrono::Utc::now().timestamp() - t) / 86_400);
+            let expiry_hint = match age_days {
+                Some(d) if d >= 7 => " · token >7 days old — likely expired (testing mode); re-auth if composing fails",
+                _ => "",
+            };
             (true, format!(
-                "token on file · scopes: {}{}",
+                "token on file · scopes: {}{}{}",
                 if has("gmail.readonly") { "gmail.readonly " } else { "" },
                 if has("calendar.readonly") { "calendar.readonly" } else { "" },
+                expiry_hint,
             ))
         }
         Err(e) => (false, format!("not connected — {e:#}")),
@@ -125,11 +137,26 @@ async fn run_live_briefing() -> Result<BriefingView, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // .env lives at the repo root; tauri dev runs with cwd=src-tauri. Anchor
-    // the process at the .env directory so the relative paths inside it
-    // (credentials, tokens) and the models/ walk-up resolve identically to
-    // the CLI.
-    if let Ok(env_path) = dotenvy::dotenv() {
+    // .env lives at the repo root; tauri dev runs with cwd=src-tauri and a
+    // bundled exe runs from target/release (or wherever it was copied).
+    // Anchor the process at the .env directory — search the cwd's ancestors
+    // first (dev), then the executable's ancestors (built exe) — so the
+    // relative paths inside .env (credentials, tokens) and the models/
+    // walk-up resolve identically everywhere.
+    let anchored = dotenvy::dotenv().ok().or_else(|| {
+        let mut dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        loop {
+            let candidate = dir.join(".env");
+            if candidate.is_file() {
+                dotenvy::from_path(&candidate).ok()?;
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    });
+    if let Some(env_path) = anchored {
         if let Some(root) = env_path.parent() {
             let _ = std::env::set_current_dir(root);
         }

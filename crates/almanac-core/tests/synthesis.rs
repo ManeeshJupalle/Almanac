@@ -157,22 +157,237 @@ fn run_scoping_latest_extraction_wins_no_duplicates() {
     almanac_core::db::insert_extracted_item(&conn, &run1).unwrap();
     almanac_core::db::insert_extracted_item(&conn, &run2).unwrap();
 
-    let inputs = almanac_core::db::briefing_inputs(&conn, day("2026-07-11")).unwrap();
+    let inputs = almanac_core::db::briefing_inputs_range(
+        &conn,
+        ts("2026-07-11T00:00:00Z"),
+        ts("2026-07-12T00:00:00Z"),
+    )
+    .unwrap();
     assert_eq!(inputs.len(), 1, "dedup must collapse re-extractions");
     assert_eq!(inputs[0].kind(), ItemKind::ActionNeeded, "latest run wins");
 }
 
 #[test]
-fn run_scoping_selects_only_the_requested_day() {
+fn run_scoping_selects_only_the_requested_range() {
     let (_dir, conn) = test_db();
     let d10 = ts("2026-07-10T23:00:00Z");
     let d11 = ts("2026-07-11T01:00:00Z");
     store(&conn, &source_object("10.1", d10), &item("10.1", ItemKind::ActionNeeded, d10));
     store(&conn, &source_object("11.1", d11), &item("11.1", ItemKind::ActionNeeded, d11));
 
-    let inputs = almanac_core::db::briefing_inputs(&conn, day("2026-07-11")).unwrap();
+    let inputs = almanac_core::db::briefing_inputs_range(
+        &conn,
+        ts("2026-07-11T00:00:00Z"),
+        ts("2026-07-12T00:00:00Z"),
+    )
+    .unwrap();
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0].provenance().native_id, "11.1");
+}
+
+// --------------------------------------------- local-tz day boundaries ----
+
+#[test]
+fn local_day_bounds_catch_late_evening_items_across_utc_midnight() {
+    // 22:30 on July 11 in UTC-5 is 03:30 UTC on July 12. Under UTC day
+    // selection this item briefs on the wrong day; under local-day bounds it
+    // belongs to July 11.
+    let tz = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+    let (start, end) = almanac_core::db::day_bounds(day("2026-07-11"), &tz).unwrap();
+    assert_eq!(start, ts("2026-07-11T05:00:00Z"));
+    assert_eq!(end, ts("2026-07-12T05:00:00Z"));
+
+    let (_dir, conn) = test_db();
+    let late_evening = ts("2026-07-12T03:30:00Z"); // 22:30 local, July 11
+    store(
+        &conn,
+        &source_object("late.1", late_evening),
+        &item("late.1", ItemKind::ActionNeeded, late_evening),
+    );
+    let inputs = almanac_core::db::briefing_inputs_range(&conn, start, end).unwrap();
+    assert_eq!(inputs.len(), 1, "late-evening local item must brief on its local day");
+
+    // And it must NOT brief on local July 12.
+    let (start12, end12) = almanac_core::db::day_bounds(day("2026-07-12"), &tz).unwrap();
+    let inputs12 = almanac_core::db::briefing_inputs_range(&conn, start12, end12).unwrap();
+    assert!(inputs12.is_empty());
+}
+
+#[test]
+fn dst_transition_day_has_23_hours_and_correct_bounds() {
+    // America/Chicago springs forward on 2026-03-08 (02:00 CST → 03:00 CDT):
+    // the local day is 23 hours long and the bounds must reflect the offset
+    // change (CST -6 at midnight, CDT -5 by the next midnight).
+    let tz: chrono_tz::Tz = "America/Chicago".parse().unwrap();
+    let (start, end) = almanac_core::db::day_bounds(day("2026-03-08"), &tz).unwrap();
+    assert_eq!(start, ts("2026-03-08T06:00:00Z"));
+    assert_eq!(end, ts("2026-03-09T05:00:00Z"));
+    assert_eq!((end - start).num_hours(), 23);
+
+    // Fall back (2026-11-01): 25-hour local day.
+    let (start, end) = almanac_core::db::day_bounds(day("2026-11-01"), &tz).unwrap();
+    assert_eq!((end - start).num_hours(), 25);
+}
+
+// ------------------------------------------------- cross-source dedup ----
+
+fn calendar_email_object(
+    native_id: &str,
+    when: DateTime<Utc>,
+    subject: &str,
+    body_html: &str,
+) -> (SourceObject, ExtractedItem) {
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(body_html);
+    let raw = json!({
+        "id": native_id,
+        "payload": {
+            "headers": [
+                { "name": "From", "value": "Google Calendar <calendar-notification@google.com>" },
+                { "name": "Subject", "value": subject }
+            ],
+            "mimeType": "text/html",
+            "body": { "size": body_html.len(), "data": data }
+        },
+        "internalDate": when.timestamp_millis().to_string()
+    });
+    let provenance = ProvenanceRef {
+        source: SourceId::Gmail,
+        native_id: native_id.to_string(),
+        deep_link: format!("https://mail.google.com/mail/#all/{native_id}"),
+    };
+    let obj = SourceObject {
+        provenance: provenance.clone(),
+        raw: RawContent::new(raw),
+        occurred_at: when,
+    };
+    let it = ExtractedItem::new(
+        ItemKind::Event,
+        subject.to_string(),
+        provenance,
+        ExtractionSignals { rule_hits: vec![], embedding_scores: None, decided_by: "test".into() },
+        when,
+    )
+    .unwrap();
+    (obj, it)
+}
+
+fn gcal_event_object(event_id: &str, when: DateTime<Utc>) -> (SourceObject, ExtractedItem) {
+    let provenance = ProvenanceRef {
+        source: SourceId::GoogleCalendar,
+        native_id: event_id.to_string(),
+        deep_link: "https://www.google.com/calendar/event?eid=abc".to_string(),
+    };
+    let obj = SourceObject {
+        provenance: provenance.clone(),
+        raw: RawContent::new(json!({ "id": event_id, "summary": "Meeting" })),
+        occurred_at: when,
+    };
+    let it = ExtractedItem::new(
+        ItemKind::Event,
+        "Meeting".to_string(),
+        provenance,
+        ExtractionSignals { rule_hits: vec![], embedding_scores: None, decided_by: "test".into() },
+        when,
+    )
+    .unwrap();
+    (obj, it)
+}
+
+#[test]
+fn dedup_suppresses_calendar_email_that_references_its_briefed_event() {
+    use base64::Engine as _;
+    let (_dir, conn) = test_db();
+    let when = ts("2026-07-11T15:00:00Z");
+    let event_id = "vdgh2ak4uln8e5tbi2scj57444"; // 26 chars, like real ids
+
+    let (event_obj, event_item) = gcal_event_object(event_id, when);
+    store(&conn, &event_obj, &event_item);
+
+    // The email body carries the real calendar link: eid = b64("<id> <cal>").
+    let eid = base64::engine::general_purpose::STANDARD
+        .encode(format!("{event_id} user@example.com"));
+    let body = format!("<a href=\"https://www.google.com/calendar/event?eid={eid}\">View</a>");
+    let (mail_obj, mail_item) =
+        calendar_email_object("mailA", when, "Invitation: Meeting", &body);
+    store(&conn, &mail_obj, &mail_item);
+
+    let (kept, suppressed) = almanac_core::synth::dedup_calendar_email_duplicates(
+        &conn,
+        vec![event_item.clone(), mail_item],
+    )
+    .unwrap();
+    assert_eq!(suppressed, 1, "email referencing the briefed event must be suppressed");
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].provenance().source, SourceId::GoogleCalendar);
+
+    // Both source objects and extracted items REMAIN stored (selection-only).
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM source_objects WHERE source = 'gmail'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn dedup_suppresses_agenda_digest_when_calendar_items_present() {
+    let (_dir, conn) = test_db();
+    let when = ts("2026-07-11T15:00:00Z");
+    let (event_obj, event_item) = gcal_event_object("someevent1234567890abcdefg", when);
+    store(&conn, &event_obj, &event_item);
+    let (mail_obj, mail_item) =
+        calendar_email_object("mailB", when, "1 event happening tomorrow", "agenda digest body");
+    store(&conn, &mail_obj, &mail_item);
+
+    let (kept, suppressed) = almanac_core::synth::dedup_calendar_email_duplicates(
+        &conn,
+        vec![event_item, mail_item],
+    )
+    .unwrap();
+    assert_eq!(suppressed, 1);
+    assert_eq!(kept.len(), 1);
+}
+
+#[test]
+fn dedup_is_conservative_no_gcal_items_or_no_match_keeps_everything() {
+    let (_dir, conn) = test_db();
+    let when = ts("2026-07-11T15:00:00Z");
+
+    // Calendar email with NO calendar item in the selection → kept.
+    let (mail_obj, mail_item) =
+        calendar_email_object("mailC", when, "1 event happening tomorrow", "body");
+    store(&conn, &mail_obj, &mail_item);
+    let (kept, suppressed) =
+        almanac_core::synth::dedup_calendar_email_duplicates(&conn, vec![mail_item.clone()])
+            .unwrap();
+    assert_eq!(suppressed, 0, "no calendar items present → nothing suppressed");
+    assert_eq!(kept.len(), 1);
+
+    // Calendar-sender email that neither matches an eid nor is a digest → kept.
+    let (event_obj, event_item) = gcal_event_object("otherevent123456789012345z", when);
+    store(&conn, &event_obj, &event_item);
+    let (mail2_obj, mail2_item) = calendar_email_object(
+        "mailD",
+        when,
+        "Notification: calendar settings changed",
+        "no event link here",
+    );
+    store(&conn, &mail2_obj, &mail2_item);
+    let (kept, suppressed) = almanac_core::synth::dedup_calendar_email_duplicates(
+        &conn,
+        vec![event_item, mail2_item],
+    )
+    .unwrap();
+    assert_eq!(suppressed, 0, "non-matching calendar email must be kept (high precision)");
+    assert_eq!(kept.len(), 2);
+
+    // Items from other sources are never touched.
+    let ordinary = item("ord.1", ItemKind::ActionNeeded, when);
+    let ordinary_obj = source_object("ord.1", when);
+    store(&conn, &ordinary_obj, &ordinary);
+    let (kept, suppressed) =
+        almanac_core::synth::dedup_calendar_email_duplicates(&conn, vec![ordinary]).unwrap();
+    assert_eq!(suppressed, 0);
+    assert_eq!(kept.len(), 1);
 }
 
 // --------------------------------------------------------- empty day ----
