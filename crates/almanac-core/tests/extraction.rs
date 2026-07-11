@@ -61,7 +61,8 @@ fn grounding_orphan_item_cannot_be_constructed() {
         native_id: "".into(),
         deep_link: "https://mail.google.com/mail/#all/x".into(),
     };
-    assert!(ExtractedItem::new(ItemKind::Noise, "x".into(), orphan, signals()).is_err());
+    let now = chrono::Utc::now();
+    assert!(ExtractedItem::new(ItemKind::Noise, "x".into(), orphan, signals(), now).is_err());
 
     // Non-https deep link → refused.
     let bad_link = ProvenanceRef {
@@ -69,7 +70,7 @@ fn grounding_orphan_item_cannot_be_constructed() {
         native_id: "C1:1.2".into(),
         deep_link: "notaurl".into(),
     };
-    assert!(ExtractedItem::new(ItemKind::Noise, "x".into(), bad_link, signals()).is_err());
+    assert!(ExtractedItem::new(ItemKind::Noise, "x".into(), bad_link, signals(), now).is_err());
 
     // Resolvable provenance → accepted.
     let good = ProvenanceRef {
@@ -77,7 +78,7 @@ fn grounding_orphan_item_cannot_be_constructed() {
         native_id: "C1:1.2".into(),
         deep_link: "https://example.slack.com/archives/C1/p12".into(),
     };
-    assert!(ExtractedItem::new(ItemKind::Noise, "x".into(), good, signals()).is_ok());
+    assert!(ExtractedItem::new(ItemKind::Noise, "x".into(), good, signals(), now).is_ok());
 }
 
 #[test]

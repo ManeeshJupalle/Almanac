@@ -107,6 +107,60 @@ pub fn insert_extracted_item(
     Ok(conn.last_insert_rowid())
 }
 
+/// Briefing inputs for a UTC day — the run-scoping rule (Phase 4):
+/// for every (source, native_id) only the LATEST extraction (max rowid)
+/// counts, so re-running extraction never yields stale or duplicate items;
+/// selection is restricted to source objects whose occurred_at falls on the
+/// given UTC date. Ordered by occurrence time.
+pub fn briefing_inputs(
+    conn: &Connection,
+    day_utc: chrono::NaiveDate,
+) -> Result<Vec<crate::extract::ExtractedItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT ei.source, ei.native_id, ei.kind, ei.summary, ei.signals_json,
+                so.deep_link, so.occurred_at
+         FROM extracted_items ei
+         JOIN source_objects so
+           ON so.source = ei.source AND so.native_id = ei.native_id
+         WHERE date(so.occurred_at) = ?1
+           AND ei.id = (SELECT MAX(id) FROM extracted_items
+                        WHERE source = ei.source AND native_id = ei.native_id)
+         ORDER BY so.occurred_at ASC, ei.native_id ASC",
+    )?;
+    let rows = stmt.query_map([day_utc.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        let (source, native_id, kind, summary, signals_json, deep_link, occurred_at) = row?;
+        let source = crate::types::SourceId::parse(&source)
+            .with_context(|| format!("unknown source '{source}' in extracted_items"))?;
+        let kind = crate::extract::ItemKind::parse(&kind)
+            .with_context(|| format!("unknown kind '{kind}' in extracted_items"))?;
+        let signals: crate::extract::ExtractionSignals = serde_json::from_str(&signals_json)?;
+        let occurred_at = chrono::DateTime::parse_from_rfc3339(&occurred_at)
+            .with_context(|| format!("bad occurred_at '{occurred_at}' in source_objects"))?
+            .with_timezone(&chrono::Utc);
+        items.push(crate::extract::ExtractedItem::new(
+            kind,
+            summary,
+            crate::types::ProvenanceRef { source, native_id, deep_link },
+            signals,
+            occurred_at,
+        )?);
+    }
+    Ok(items)
+}
+
 /// (kind, count) rows for reporting.
 pub fn count_items_by_kind(conn: &Connection) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn

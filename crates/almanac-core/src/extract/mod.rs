@@ -82,6 +82,7 @@ pub struct ExtractedItem {
     summary: String,
     provenance: ProvenanceRef,
     signals: ExtractionSignals,
+    occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl ExtractedItem {
@@ -90,6 +91,7 @@ impl ExtractedItem {
         summary: String,
         provenance: ProvenanceRef,
         signals: ExtractionSignals,
+        occurred_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<Self> {
         ensure!(
             !provenance.native_id.trim().is_empty(),
@@ -100,7 +102,7 @@ impl ExtractedItem {
             "grounding violation: deep_link '{}' is not an https URL",
             provenance.deep_link
         );
-        Ok(Self { kind, summary, provenance, signals })
+        Ok(Self { kind, summary, provenance, signals, occurred_at })
     }
 
     pub fn kind(&self) -> ItemKind {
@@ -114,6 +116,10 @@ impl ExtractedItem {
     }
     pub fn signals(&self) -> &ExtractionSignals {
         &self.signals
+    }
+    /// When the underlying source object occurred (from the source, not us).
+    pub fn occurred_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.occurred_at
     }
 }
 
@@ -186,7 +192,7 @@ impl Extractor {
         };
 
         // Provenance passes through UNCHANGED from the source object.
-        ExtractedItem::new(kind, text.summary, obj.provenance.clone(), signals)
+        ExtractedItem::new(kind, text.summary, obj.provenance.clone(), signals, obj.occurred_at)
     }
 
     /// Extract a batch. Output length always equals input length — noise is

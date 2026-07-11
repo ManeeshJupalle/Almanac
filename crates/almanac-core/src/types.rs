@@ -16,6 +16,17 @@ pub enum SourceId {
     Slack,
 }
 
+impl SourceId {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "gmail" => SourceId::Gmail,
+            "gcal" => SourceId::GoogleCalendar,
+            "slack" => SourceId::Slack,
+            _ => return None,
+        })
+    }
+}
+
 impl std::fmt::Display for SourceId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {

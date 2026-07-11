@@ -18,9 +18,11 @@ fn main() -> ExitCode {
         Some("refresh-slack") => block_on(refresh_slack()),
         Some("extract-fixtures") => extract_fixtures(),
         Some("extract-live") => block_on(extract_live()),
+        Some("synthesize") => block_on(synthesize(args.get(1).cloned())),
+        Some("e2e-fixtures") => block_on(e2e_fixtures()),
         _ => {
             eprintln!(
-                "usage: almanac-core <--self-check|smoke-adapters|refresh-google|refresh-slack|extract-fixtures|extract-live>"
+                "usage: almanac-core <--self-check|smoke-adapters|refresh-google|refresh-slack|extract-fixtures|extract-live|synthesize [YYYY-MM-DD]|e2e-fixtures>"
             );
             return ExitCode::from(2);
         }
@@ -158,6 +160,94 @@ fn extract_fixtures() -> Result<()> {
     }
     println!("persisted to {}; kind counts: {:?}", db_path.display(),
         almanac_core::db::count_items_by_kind(&conn)?);
+    Ok(())
+}
+
+fn print_briefing(briefing: &almanac_core::synth::Briefing, elapsed: std::time::Duration) {
+    println!("briefing (synthesis took {elapsed:?}):");
+    for (i, item) in briefing.sequence.iter().enumerate() {
+        println!(
+            "  {}. [{}] {} ({}:{})",
+            i + 1,
+            item.kind,
+            item.summary,
+            item.provenance.source,
+            item.provenance.native_id
+        );
+    }
+    println!("  why: {}", briefing.rationale);
+}
+
+/// Synthesize a validated briefing for a UTC date (default: today).
+async fn synthesize(date_arg: Option<String>) -> Result<()> {
+    if network_reachable() {
+        println!("network: REACHABLE — rerun with networking disabled to prove the offline gate");
+    } else {
+        println!("network: UNREACHABLE — offline run confirmed");
+    }
+    let date = match date_arg {
+        Some(d) => d.parse().map_err(|e| anyhow::anyhow!("bad date '{d}': {e}"))?,
+        None => Utc::now().date_naive(),
+    };
+    let backend = almanac_core::synth::local_llm::LocalLlmBackend::load(
+        &std::path::Path::new("models").join("qwen2.5-0.5b-instruct"),
+    )?;
+    println!("backend: {}", almanac_core::synth::SynthesisBackend::backend_id(&backend));
+
+    let db_path = almanac_core::init_default_db()?;
+    let conn = almanac_core::db::open(&db_path)?;
+    let ctx = almanac_core::synth::DayContext { date, now: Utc::now() };
+    let started = std::time::Instant::now();
+    let briefing = almanac_core::synth::generate_briefing(&conn, &backend, ctx).await?;
+    print_briefing(&briefing, started.elapsed());
+    Ok(())
+}
+
+/// Fully offline end-to-end: fixtures → extraction → synthesis → validated
+/// briefing, using the day (from the fixture data) that has non-noise items.
+async fn e2e_fixtures() -> Result<()> {
+    if network_reachable() {
+        println!("network: REACHABLE — rerun with networking disabled to prove the offline gate");
+    } else {
+        println!("network: UNREACHABLE — offline run confirmed");
+    }
+
+    // Extraction (MiniLM, local files).
+    let extractor = almanac_core::extract::Extractor::with_model(
+        &std::path::Path::new("models").join("minilm"),
+    )?;
+    let objects = fixture_source_objects()?;
+    let items = extractor.extract(&objects)?;
+    let db_path = almanac_core::init_default_db()?;
+    let conn = almanac_core::db::open(&db_path)?;
+    for (obj, item) in objects.iter().zip(&items) {
+        almanac_core::db::insert_source_object(&conn, obj)?;
+        almanac_core::db::insert_extracted_item(&conn, item)?;
+    }
+    println!("extraction: {} fixture source objects classified + persisted", items.len());
+
+    // Pick the most recent fixture day that has a non-noise item.
+    let date: String = conn.query_row(
+        "SELECT date(so.occurred_at)
+         FROM extracted_items ei
+         JOIN source_objects so ON so.source = ei.source AND so.native_id = ei.native_id
+         WHERE ei.kind != 'noise'
+         ORDER BY so.occurred_at DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let date: chrono::NaiveDate = date.parse()?;
+    println!("briefing day selected from data: {date}");
+
+    // Synthesis (Qwen, local files) + grounding validation.
+    let backend = almanac_core::synth::local_llm::LocalLlmBackend::load(
+        &std::path::Path::new("models").join("qwen2.5-0.5b-instruct"),
+    )?;
+    let ctx = almanac_core::synth::DayContext { date, now: Utc::now() };
+    let started = std::time::Instant::now();
+    let briefing = almanac_core::synth::generate_briefing(&conn, &backend, ctx).await?;
+    print_briefing(&briefing, started.elapsed());
+    println!("grounding validation: PASSED (briefing was accepted)");
     Ok(())
 }
 
