@@ -1,0 +1,53 @@
+# Rust
+/target
+**/target
+# Cargo.lock is tracked on purpose: Almanac ships a binary app.
+
+# Node / frontend
+node_modules
+dist
+dist-ssr
+.vite
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+
+# Local database & anything with real data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Secrets / OAuth — CRITICAL, these must NEVER be committed
+.env
+.env.*
+*.local
+/fixtures/**/secrets*
+client_secret*.json
+credentials*.json
+token*.json
+tokens/
+*.pem
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea
+*.swp
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.vscode/*
+!.vscode/extensions.json

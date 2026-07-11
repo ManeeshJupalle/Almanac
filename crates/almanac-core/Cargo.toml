@@ -1,0 +1,21 @@
+[package]
+name = "almanac-core"
+version = "0.1.0"
+edition = "2021"
+description = "Almanac headless core engine — runs and is testable without the Tauri shell"
+
+[lib]
+name = "almanac_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "almanac-core"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.103"
+dirs = "6.0.0"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

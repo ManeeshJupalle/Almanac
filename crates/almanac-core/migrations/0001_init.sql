@@ -1,0 +1,2 @@
+-- 0001_init: intentionally empty schema (Phase 0).
+-- Domain tables (fixtures, entities, briefings, tokens) arrive in later phases.
