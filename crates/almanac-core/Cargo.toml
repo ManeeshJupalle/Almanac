@@ -14,9 +14,23 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.103"
+async-trait = "0.1.89"
+base64 = "0.22.1"
+chrono = "0.4.45"
 dirs = "6.0.0"
+dotenvy = "0.15.7"
+reqwest = { version = "0.13.4", features = ["form"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
+sha2 = "0.11.0"
+tokio = { version = "1.52.3", features = ["macros", "rt", "time"] }
+url = "2.5.8"
 
 [dev-dependencies]
+serde = "1.0.228"
 serde_json = "1.0.150"
+static_assertions = "1.1.0"
 tempfile = "3.27.0"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

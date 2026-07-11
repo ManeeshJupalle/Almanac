@@ -4,7 +4,10 @@
 //! and is testable without the Tauri shell. The shell is a client of this
 //! crate, never the engine.
 
+pub mod adapters;
+pub mod auth;
 pub mod db;
+pub mod types;
 
 use std::path::PathBuf;
 

@@ -1,5 +1,6 @@
-//! Windows DPAPI wrappers. Tokens at rest are encrypted with
-//! CryptProtectData, bound to the current OS user — never plaintext.
+//! Windows DPAPI wrappers — tokens at rest are encrypted with
+//! CryptProtectData, bound to the current OS user. Never plaintext.
+//! Windows-only; `super::mod` returns an error on other platforms.
 
 use anyhow::{Context, Result};
 use windows::core::PCWSTR;
@@ -30,8 +31,9 @@ pub fn unprotect(ciphertext: &[u8]) -> Result<Vec<u8>> {
             pbData: ciphertext.as_ptr() as *mut u8,
         };
         let mut output = CRYPT_INTEGER_BLOB::default();
-        CryptUnprotectData(&input, None, None, None, None, 0, &mut output)
-            .context("CryptUnprotectData failed (token was encrypted by a different Windows user?)")?;
+        CryptUnprotectData(&input, None, None, None, None, 0, &mut output).context(
+            "CryptUnprotectData failed (token was encrypted by a different Windows user?)",
+        )?;
         let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
         let _ = LocalFree(Some(HLOCAL(output.pbData as _)));
         Ok(bytes)

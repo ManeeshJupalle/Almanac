@@ -10,6 +10,7 @@ name = "fixture-capture"
 path = "src/main.rs"
 
 [dependencies]
+almanac-core = { version = "0.1.0", path = "../almanac-core" }
 anyhow = "1.0.103"
 base64 = "0.22.1"
 chrono = "0.4.45"
@@ -22,4 +23,3 @@ sha2 = "0.11.0"
 tokio = { version = "1.52.3", features = ["macros", "rt", "net", "time"] }
 url = "2.5.8"
 webbrowser = "1.2.1"
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }

@@ -6,7 +6,6 @@
 //! payload-first invariant they must be written against these fixtures.
 
 mod config;
-mod dpapi;
 mod google;
 mod loopback;
 mod redact;

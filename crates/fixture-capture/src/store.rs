@@ -1,43 +1,21 @@
-//! Token storage (DPAPI-encrypted, at the gitignored paths from .env) and
-//! fixture writing (raw copy to gitignored .fixtures-raw/, redacted
-//! structure-preserving copy to FIXTURES_DIR).
+//! Token storage (delegated to almanac-core's encrypted store, at the
+//! gitignored paths from .env) and fixture writing (raw copy to gitignored
+//! .fixtures-raw/, redacted structure-preserving copy to FIXTURES_DIR).
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use base64::Engine as _;
 use serde_json::Value;
-
-use crate::dpapi;
 
 pub fn save_token(path_env: &str, token_json: &Value) -> Result<PathBuf> {
     let path = PathBuf::from(crate::config::required(path_env)?);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let plaintext = serde_json::to_vec(token_json)?;
-    let blob = dpapi::protect(&plaintext)?;
-    let envelope = serde_json::json!({
-        "format": "dpapi-v1",
-        "note": "DPAPI-encrypted OAuth token bound to this Windows user. Not plaintext.",
-        "ciphertext_b64": base64::engine::general_purpose::STANDARD.encode(&blob),
-    });
-    std::fs::write(&path, serde_json::to_vec_pretty(&envelope)?)?;
+    almanac_core::auth::save_token(&path, token_json)?;
     Ok(path)
 }
 
 pub fn load_token(path_env: &str) -> Result<Value> {
     let path = PathBuf::from(crate::config::required(path_env)?);
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("no token at {} — run the auth step first", path.display()))?;
-    let envelope: Value = serde_json::from_str(&raw)?;
-    let b64 = envelope
-        .get("ciphertext_b64")
-        .and_then(Value::as_str)
-        .context("token file is not a dpapi-v1 envelope")?;
-    let blob = base64::engine::general_purpose::STANDARD.decode(b64)?;
-    let plaintext = dpapi::unprotect(&blob)?;
-    Ok(serde_json::from_slice(&plaintext)?)
+    almanac_core::auth::load_token(&path)
 }
 
 /// Save a captured response: exact raw bytes to .fixtures-raw/ (gitignored,
