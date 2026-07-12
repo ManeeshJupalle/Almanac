@@ -132,18 +132,29 @@ fn get_connection_status() -> Vec<SourceStatusView> {
     ]
 }
 
+/// Guards against overlapping composes (audit F-10): the UI disables its
+/// button, but this serializes at the command layer too, so a double-invoke
+/// over IPC can't run two live chains against the same DB at once.
+static COMPOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Full live chain (adapters → extraction → synthesis → persisted briefing),
 /// entirely inside the core. Long-running: model inference is CPU-bound, so
 /// it runs on the blocking pool, not a runtime worker.
 #[tauri::command]
 async fn run_live_briefing() -> Result<BriefingView, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+    use std::sync::atomic::Ordering;
+    if COMPOSING.swap(true, Ordering::SeqCst) {
+        return Err("A briefing is already being composed — please wait.".into());
+    }
+    let result = tauri::async_runtime::spawn_blocking(|| {
         tauri::async_runtime::block_on(async {
             almanac_core::live_briefing().await.map(to_view).map_err(|e| format!("{e:#}"))
         })
     })
     .await
-    .map_err(|e| format!("briefing task panicked: {e}"))?
+    .map_err(|e| format!("briefing task panicked: {e}"));
+    COMPOSING.store(false, Ordering::SeqCst);
+    result?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

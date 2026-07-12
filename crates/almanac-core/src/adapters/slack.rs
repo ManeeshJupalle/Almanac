@@ -17,15 +17,21 @@ pub struct SlackAdapter {
     /// Workspace base URL from auth.test (e.g. https://team.slack.com/),
     /// resolved in authenticate(); needed for real message deep links.
     workspace_url: Option<String>,
+    truncated: std::sync::atomic::AtomicBool,
 }
 
 impl SlackAdapter {
     pub fn new(auth: SlackAuth) -> Self {
-        Self { auth, http: reqwest::Client::new(), workspace_url: None }
+        Self { auth, http: reqwest::Client::new(), workspace_url: None, truncated: Default::default() }
     }
 
     pub fn from_env() -> Result<Self> {
         Ok(Self::new(SlackAuth::from_env()?))
+    }
+
+    /// True if the last fetch_window hit a page cap with more to fetch (F-6).
+    pub fn was_truncated(&self) -> bool {
+        self.truncated.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn call(&self, method: &str, params: &[(&str, &str)]) -> Result<Value> {
@@ -73,6 +79,7 @@ impl super::SourceAdapter for SlackAdapter {
         //    next_cursor == "" (empty string), handled by next_cursor().
         let mut channels: Vec<Value> = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut truncated = false;
         for _ in 0..MAX_PAGES {
             let mut params = vec![("limit", "100"), ("types", "public_channel")];
             let cursor_val;
@@ -88,6 +95,7 @@ impl super::SourceAdapter for SlackAdapter {
                 break;
             }
         }
+        truncated |= cursor.is_some();
 
         // 2. History per member channel within the window. Slack's oldest/
         //    latest take ts-style second strings.
@@ -136,7 +144,10 @@ impl super::SourceAdapter for SlackAdapter {
                     break;
                 }
             }
+            // Broke out of the per-channel loop with more history available.
+            truncated |= cursor.is_some();
         }
+        self.truncated.store(truncated, std::sync::atomic::Ordering::Relaxed);
         Ok(objects)
     }
 }

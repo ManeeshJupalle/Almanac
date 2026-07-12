@@ -16,15 +16,23 @@ const MAX_PAGES: usize = 4;
 pub struct GmailAdapter {
     auth: GoogleAuth,
     http: reqwest::Client,
+    /// Set when fetch_window stopped at the page cap with more available
+    /// (audit F-6). Read via `was_truncated()` after fetch.
+    truncated: std::sync::atomic::AtomicBool,
 }
 
 impl GmailAdapter {
     pub fn new(auth: GoogleAuth) -> Self {
-        Self { auth, http: reqwest::Client::new() }
+        Self { auth, http: reqwest::Client::new(), truncated: Default::default() }
     }
 
     pub fn from_env() -> Result<Self> {
         Ok(Self::new(GoogleAuth::from_env()?))
+    }
+
+    /// True if the last fetch_window hit the page cap with more to fetch.
+    pub fn was_truncated(&self) -> bool {
+        self.truncated.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     async fn get(&self, url: url::Url) -> Result<Value> {
@@ -91,6 +99,8 @@ impl super::SourceAdapter for GmailAdapter {
                 break;
             }
         }
+        // Loop exhausted MAX_PAGES with a live page token → truncated.
+        self.truncated.store(page_token.is_some(), std::sync::atomic::Ordering::Relaxed);
         Ok(objects)
     }
 }

@@ -263,8 +263,10 @@ pub fn build_digest(items: &[ExtractedItem]) -> String {
         .map(|(i, item)| {
             let tag = match item.kind() {
                 ItemKind::Event => {
-                    let t = item.occurred_at();
-                    format!("event at {:02}:{:02} UTC", t.hour(), t.minute())
+                    // F-8: local clock time, not UTC — within one local day UTC
+                    // times can wrap midnight and mislead the model's ordering.
+                    let t = item.occurred_at().with_timezone(&chrono::Local);
+                    format!("event at {:02}:{:02}", t.hour(), t.minute())
                 }
                 ItemKind::ActionNeeded => "action needed".to_string(),
                 ItemKind::Commitment => "commitment".to_string(),
@@ -339,12 +341,16 @@ pub fn templated_rationale(sequence: &[PlannedItem]) -> String {
         composition.join(", ")
     )];
     if !events.is_empty() {
+        // F-8: local clock times so the rationale agrees with the ledger rows.
         let times = events
             .iter()
-            .map(|e| format!("{:02}:{:02}", e.occurred_at.hour(), e.occurred_at.minute()))
+            .map(|e| {
+                let t = e.occurred_at.with_timezone(&chrono::Local);
+                format!("{:02}:{:02}", t.hour(), t.minute())
+            })
             .collect::<Vec<_>>()
             .join(", ");
-        sentences.push(format!("Timed events hold their scheduled slots ({times} UTC)."));
+        sentences.push(format!("Timed events hold their scheduled slots ({times})."));
     }
     if let Some(first_event_pos) = sequence.iter().position(|i| i.kind == ItemKind::Event) {
         let early = sequence[..first_event_pos]
@@ -430,8 +436,41 @@ mod tests {
         let r = templated_rationale(&seq);
         assert!(r.contains("4 items briefed"), "{r}");
         assert!(r.contains("2 timed events"), "{r}");
-        assert!(r.contains("09:30, 16:00 UTC"), "{r}");
+        // F-8: rationale times are LOCAL, so compute expected in local tz
+        // (timezone-robust) and confirm no bare "UTC" label remains.
+        let local = |at: &str| {
+            let t = at.parse::<chrono::DateTime<chrono::Utc>>().unwrap().with_timezone(&chrono::Local);
+            format!("{:02}:{:02}", t.hour(), t.minute())
+        };
+        let expected = format!("{}, {}", local("2026-07-11T09:30:00Z"), local("2026-07-11T16:00:00Z"));
+        assert!(r.contains(&expected), "expected local slots '{expected}' in: {r}");
+        assert!(!r.contains("UTC"), "rationale should show local time, not UTC: {r}");
         assert!(r.contains("1 loose item front-loaded"), "{r}");
         assert!(r.contains("on-device model"), "{r}");
+    }
+
+    #[test]
+    fn digest_uses_local_event_times_not_utc() {
+        // F-8: an event stored in UTC must be tagged with its LOCAL clock time
+        // in the digest the model orders over.
+        use crate::extract::{ExtractedItem, ExtractionSignals};
+        let when = "2026-07-11T02:30:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        let local = when.with_timezone(&chrono::Local);
+        let item = ExtractedItem::new(
+            ItemKind::Event,
+            "Late night sync".into(),
+            crate::types::ProvenanceRef {
+                source: crate::types::SourceId::GoogleCalendar,
+                native_id: "e1".into(),
+                deep_link: "https://www.google.com/calendar/event?eid=e1".into(),
+            },
+            ExtractionSignals { rule_hits: vec![], embedding_scores: None, decided_by: "t".into() },
+            when,
+        )
+        .unwrap();
+        let digest = build_digest(std::slice::from_ref(&item));
+        let expected = format!("event at {:02}:{:02}", local.hour(), local.minute());
+        assert!(digest.contains(&expected), "expected '{expected}' in digest: {digest}");
+        assert!(!digest.contains("UTC"), "digest should not label UTC: {digest}");
     }
 }

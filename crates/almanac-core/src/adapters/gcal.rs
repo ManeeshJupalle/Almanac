@@ -14,15 +14,21 @@ const MAX_PAGES: usize = 4;
 pub struct CalendarAdapter {
     auth: GoogleAuth,
     http: reqwest::Client,
+    truncated: std::sync::atomic::AtomicBool,
 }
 
 impl CalendarAdapter {
     pub fn new(auth: GoogleAuth) -> Self {
-        Self { auth, http: reqwest::Client::new() }
+        Self { auth, http: reqwest::Client::new(), truncated: Default::default() }
     }
 
     pub fn from_env() -> Result<Self> {
         Ok(Self::new(GoogleAuth::from_env()?))
+    }
+
+    /// True if the last fetch_window hit the page cap with more to fetch (F-6).
+    pub fn was_truncated(&self) -> bool {
+        self.truncated.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -78,6 +84,7 @@ impl super::SourceAdapter for CalendarAdapter {
                 break;
             }
         }
+        self.truncated.store(page_token.is_some(), std::sync::atomic::Ordering::Relaxed);
         Ok(objects)
     }
 }

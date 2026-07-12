@@ -232,6 +232,26 @@ fn dst_transition_day_has_23_hours_and_correct_bounds() {
     assert_eq!((end - start).num_hours(), 25);
 }
 
+#[test]
+fn dst_midnight_gap_day_does_not_hard_fail() {
+    // F-7: America/Santiago springs forward AT midnight (2026-09-06: 00:00 →
+    // 01:00), so local midnight does not exist. day_bounds must not error —
+    // it walks forward to the first representable instant (01:00 local).
+    let tz: chrono_tz::Tz = "America/Santiago".parse().unwrap();
+    let (start, end) = almanac_core::db::day_bounds(day("2026-09-06"), &tz).unwrap();
+    // Start is 01:00 local on the transition day; end is normal midnight next.
+    assert!(end > start, "bounds must be ordered");
+    assert!((end - start).num_hours() >= 22, "gap day is ~23h, got {}h", (end - start).num_hours());
+
+    // The previous day (whose end bound is the missing midnight) also resolves.
+    let (pstart, pend) = almanac_core::db::day_bounds(day("2026-09-05"), &tz).unwrap();
+    assert!(pend > pstart);
+    // And a briefing for the gap day succeeds rather than erroring.
+    let (_dir, conn) = test_db();
+    let inputs = almanac_core::db::briefing_inputs_range(&conn, start, end).unwrap();
+    assert!(inputs.is_empty());
+}
+
 // ------------------------------------------------- cross-source dedup ----
 
 fn calendar_email_object(

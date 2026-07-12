@@ -70,16 +70,50 @@ pub async fn live_briefing() -> Result<db::StoredBriefing> {
     )?;
     let window = types::TimeWindow { start, end };
 
+    // Partial-source degradation (audit F-5): fetch each source independently
+    // and keep whatever succeeds. Google testing-mode tokens expire weekly by
+    // design, so an expired Gmail token must NOT prevent a Slack+Calendar
+    // briefing. Per-source failures and truncations are reported in the
+    // rationale; we fail entirely only when EVERY source fails.
     let mut objects = Vec::new();
-    let mut gmail = adapters::gmail::GmailAdapter::from_env()?;
-    gmail.authenticate().await?;
-    objects.extend(gmail.fetch_window(window).await?);
-    let mut gcal = adapters::gcal::CalendarAdapter::from_env()?;
-    gcal.authenticate().await?;
-    objects.extend(gcal.fetch_window(window).await?);
-    let mut slack = adapters::slack::SlackAdapter::from_env()?;
-    slack.authenticate().await?;
-    objects.extend(slack.fetch_window(window).await?);
+    let mut notes: Vec<String> = Vec::new();
+    let mut failures = 0usize;
+    let mut source_count = 0usize;
+
+    macro_rules! pull {
+        ($label:expr, $adapter:expr) => {{
+            source_count += 1;
+            let mut adapter = $adapter;
+            match async { adapter.authenticate().await?; adapter.fetch_window(window).await }.await {
+                Ok(objs) => {
+                    if adapter.was_truncated() {
+                        notes.push(format!("{} results were truncated at the fetch cap", $label));
+                    }
+                    objects.extend(objs);
+                }
+                Err(e) => {
+                    failures += 1;
+                    // Error text is safe: adapter errors carry status/scopes,
+                    // never tokens or raw content.
+                    notes.push(format!("{} was unavailable this run ({})", $label, first_line(&e)));
+                }
+            }
+        }};
+    }
+
+    if let Ok(a) = adapters::gmail::GmailAdapter::from_env() {
+        pull!("Gmail", a);
+    }
+    if let Ok(a) = adapters::gcal::CalendarAdapter::from_env() {
+        pull!("Calendar", a);
+    }
+    if let Ok(a) = adapters::slack::SlackAdapter::from_env() {
+        pull!("Slack", a);
+    }
+
+    if failures == source_count {
+        anyhow::bail!("every source failed this run: {}", notes.join("; "));
+    }
 
     let models = models_dir()?;
     let extractor = extract::Extractor::with_model(&models.join("minilm"))?;
@@ -100,9 +134,17 @@ pub async fn live_briefing() -> Result<db::StoredBriefing> {
 
     let backend = synth::local_llm::LocalLlmBackend::load(&models.join("qwen2.5-0.5b-instruct"))?;
     let ctx = synth::DayContext { date, now: chrono::Utc::now() };
-    let briefing = synth::generate_briefing(&conn, &backend, ctx).await?;
+    let mut briefing = synth::generate_briefing(&conn, &backend, ctx).await?;
+    if !notes.is_empty() {
+        briefing.rationale.push_str(&format!(" (Fetch notes: {}.)", notes.join("; ")));
+    }
     db::insert_briefing(&mut conn, date, synth::SynthesisBackend::backend_id(&backend), &briefing)?;
     db::latest_briefing(&conn)?.context("briefing vanished after insert")
+}
+
+/// First line of an error chain — keeps rationale notes short and single-line.
+fn first_line(err: &anyhow::Error) -> String {
+    format!("{err}").lines().next().unwrap_or("error").to_string()
 }
 
 /// Headless sanity check backing `almanac-core --self-check`: initialize the

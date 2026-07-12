@@ -45,6 +45,9 @@ pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)
         .with_context(|| format!("opening database at {}", path.display()))?;
     conn.pragma_update(None, "foreign_keys", true)?;
+    // Wait rather than fail immediately when another writer (UI compose + CLI)
+    // holds the lock (audit F-10).
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     Ok(conn)
 }
 
@@ -162,15 +165,20 @@ pub fn day_bounds<Tz: chrono::TimeZone>(
     tz: &Tz,
 ) -> Result<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
     let midnight = |d: chrono::NaiveDate| -> Result<chrono::DateTime<chrono::Utc>> {
-        let naive = d.and_hms_opt(0, 0, 0).context("invalid midnight")?;
-        // DST can make local midnight ambiguous or nonexistent; earliest()
-        // picks the first valid instant, matching user intuition of "the
-        // start of the day".
-        let local = tz
-            .from_local_datetime(&naive)
-            .earliest()
-            .with_context(|| format!("no valid local midnight for {d}"))?;
-        Ok(local.with_timezone(&chrono::Utc))
+        // DST spring-forward can make local midnight nonexistent (e.g.
+        // America/Santiago, Havana: 00:00 → 01:00). Audit F-7: instead of
+        // failing that day, walk forward minute by minute to the first
+        // representable instant — the day still starts.
+        for add_min in 0..=180 {
+            let naive = d
+                .and_hms_opt(0, 0, 0)
+                .context("invalid midnight")?
+                + chrono::Duration::minutes(add_min);
+            if let Some(local) = tz.from_local_datetime(&naive).earliest() {
+                return Ok(local.with_timezone(&chrono::Utc));
+            }
+        }
+        anyhow::bail!("no representable local start-of-day within 3h of midnight for {d}")
     };
     Ok((midnight(date)?, midnight(date.succ_opt().context("date overflow")?)?))
 }
