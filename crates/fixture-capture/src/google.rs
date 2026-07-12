@@ -103,52 +103,11 @@ pub async fn authorize() -> Result<()> {
     Ok(())
 }
 
-/// Current access token, refreshing via refresh_token when near expiry.
+/// Current access token, refreshing when near expiry. Delegates to the SINGLE
+/// implementation in almanac-core (audit F-20: this used to be a second,
+/// drifting copy of the refresh logic).
 async fn access_token() -> Result<String> {
-    let token = crate::store::load_token("GOOGLE_TOKEN_PATH")
-        .context("run `fixture-capture google-auth` first")?;
-    let obtained = token.get("obtained_at_unix").and_then(Value::as_i64).unwrap_or(0);
-    let expires_in = token.get("expires_in").and_then(Value::as_i64).unwrap_or(0);
-    if chrono::Utc::now().timestamp() - obtained < expires_in - 120 {
-        return Ok(token
-            .get("access_token")
-            .and_then(Value::as_str)
-            .context("stored token missing access_token")?
-            .to_string());
-    }
-
-    let (client_id, client_secret, _, token_uri) = installed_client()?;
-    let refresh = token
-        .get("refresh_token")
-        .and_then(Value::as_str)
-        .context("stored token has no refresh_token — re-run google-auth")?
-        .to_string();
-    let resp = reqwest::Client::new()
-        .post(&token_uri)
-        .form(&[
-            ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
-            ("refresh_token", refresh.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
-        .send()
-        .await?;
-    let status = resp.status();
-    let body = resp.text().await?;
-    if !status.is_success() {
-        bail!("Google token refresh failed ({status})");
-    }
-    let mut fresh: Value = serde_json::from_str(&body)?;
-    if fresh.get("refresh_token").is_none() {
-        fresh["refresh_token"] = Value::String(refresh);
-    }
-    fresh["obtained_at_unix"] = chrono::Utc::now().timestamp().into();
-    crate::store::save_token("GOOGLE_TOKEN_PATH", &fresh)?;
-    Ok(fresh
-        .get("access_token")
-        .and_then(Value::as_str)
-        .context("refresh response missing access_token")?
-        .to_string())
+    almanac_core::auth::GoogleAuth::from_env()?.access_token().await
 }
 
 async fn get_json(url: url::Url, bearer: &str) -> Result<String> {

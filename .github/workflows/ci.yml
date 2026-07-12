@@ -5,8 +5,8 @@ on:
   pull_request:
 
 jobs:
-  core:
-    name: Core (headless)
+  core-linux:
+    name: Core (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +21,57 @@ jobs:
           out=$(cargo run -p almanac-core --bin almanac-core --locked -- --self-check)
           echo "$out"
           test "$out" = "core ok"
+
+  # Windows job: the DPAPI token-encryption path is cfg(windows), so it is
+  # never compiled on Linux (audit F-9). This job compiles it and runs the
+  # token round-trip test on the real backend.
+  core-windows:
+    name: Core (Windows, DPAPI)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test core (DPAPI compiled)
+        run: cargo test -p almanac-core --locked
+
+  # Build the whole workspace (incl. the Tauri shell lib and fixture-capture)
+  # so a broken shell can't ship green (audit F-9). No bundling here.
+  workspace-build:
+    name: Workspace build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Tauri Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev
+      - run: cargo build --workspace --locked
+
+  audit:
+    name: Supply-chain audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Informational: surfaces advisories as annotations but does not fail the
+      # run — the current tree only carries known unmaintained/transitive
+      # advisories (glib on Linux, proc-macro-error, paste) deep in Tauri's
+      # deps that we can't bump directly. Review new findings on each run.
+      - name: cargo audit
+        continue-on-error: true
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: npm audit (high+)
+        run: npm audit --audit-level=high
 
   frontend:
     name: Frontend (typecheck + build)
