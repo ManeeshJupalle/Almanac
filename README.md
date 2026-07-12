@@ -27,9 +27,15 @@ That privacy sentence is enforced, not aspirational — see below.
 - `RawContent` (and `SourceObject`) **do not implement `serde::Serialize`** —
   a compile-time guarantee, pinned by `static_assertions` in
   [`tests/raw_content_local.rs`](crates/almanac-core/tests/raw_content_local.rs).
-  Every outbound network call in the codebase serializes through serde, so raw
-  content *cannot* be placed into one. The UI receives a string-field DTO
-  (summary, kind, provenance) over Tauri IPC — never raw payloads.
+  Outbound request *bodies* are built through serde, so raw content cannot be
+  placed into one. (One honest scope note: URL query strings are built as
+  plain strings, a channel the type system does not police — every adapter
+  call site only ever sends window timestamps, API-issued cursors/ids, and
+  channel ids, verified by enumeration, but the guarantee is narrower than
+  "no outbound call can carry it".) `RawContent`/`SourceObject` also carry a
+  manual redacted `Debug`, so a stray `{:?}` can't leak bodies to logs. The UI
+  receives a string-field DTO (summary, kind, provenance) over Tauri IPC —
+  never raw payloads.
 - **Extraction runs on-device**: all-MiniLM-L6-v2 (ONNX, via pure-Rust
   tract-onnx). Verified with the network physically disabled: the pipeline's
   own probe reported `network: UNREACHABLE — offline run confirmed`, then
@@ -43,6 +49,13 @@ That privacy sentence is enforced, not aspirational — see below.
 
 What *does* leave the machine: OAuth requests to Google/Slack and the API
 calls that fetch your data (read-only scopes). Nothing else.
+
+**At-rest posture (honest):** OAuth *tokens* are DPAPI-encrypted, but the
+fetched message/event content is stored **unencrypted** in the local SQLite DB
+(`%APPDATA%\Almanac\almanac.db`). The privacy claim is about *transmission*
+(nothing is sent off-device), not at-rest encryption — the DB is as protected
+as your OS user account. Encrypting `raw_json` (via the existing DPAPI helpers
+or SQLCipher) is a known, deliberate follow-up, not a shipped feature.
 
 ## The grounding story
 
@@ -106,10 +119,13 @@ event's own `htmlLink`), Slack (workspace archives permalink — verified
   replaceable; the ordering is the model's, the rationale text is templated
   from real signals of the chosen sequence (see honest misses for why).
 - **Run-scoping**: briefings select the latest extraction per source object
-  over the user's **local** calendar day (DST-aware), and calendar-notification
-  emails that duplicate a briefed event are suppressed from selection
-  (high-precision match on the event id embedded in the email; everything
-  stays stored).
+  over the user's **local** calendar day (DST-aware). Tomorrow's events surface
+  in a separate "Coming up" preview rather than hijacking today's plan.
+  Google calendar-notification emails that duplicate a briefed event are
+  suppressed from selection — matched either by the event id embedded in the
+  email's link (high precision) or, for pure agenda-digest emails, by the
+  Google-Calendar sender when calendar items are already present that day.
+  Everything stays stored; only the *selection* is dedup'd.
 
 ## Honest misses
 
@@ -151,38 +167,54 @@ Things that don't work as well as the demo suggests, measured, not vibes:
   and the link is Google's own `htmlLink`, stored verbatim (the decoded `eid`
   matches the stored event id). Both are downstream web-app quirks on links
   Almanac constructs correctly, not grounding failures.
-- **Google testing-mode consent expires every 7 days.** Composing then fails
-  with an explicit "reconnect with google-auth" message (this exact path is
-  exercised by a test utility, `debug-expire-google-token`) and the status
-  chip warns when the token is older than 7 days.
+- **Google testing-mode consent expires every 7 days.** Composing degrades
+  gracefully — an expired Gmail token still yields a Slack+Calendar briefing
+  whose rationale notes "Gmail was unavailable this run"; a compose fails
+  entirely only when *every* source fails. The status chip also warns when the
+  token is older than 7 days.
+- **Fetch is capped and the cap is now reported.** Each source pages up to a
+  fixed bound (100 Gmail messages, 200 Calendar events, 400 channels/400
+  msgs-per-channel per window). On a busy week the briefing rationale says so
+  ("Gmail results were truncated at the fetch cap") rather than silently
+  dropping recall.
+- **Gmail deep links assume the browser's default Google account.** The
+  `#all/<id>` form opens `/u/0`; a multi-account user whose connected account
+  isn't the default lands in the wrong mailbox. Assessed during the audit and
+  left as-is rather than shipping an `authuser=` form I couldn't verify against
+  multiple accounts without risking the verified single-account behavior.
 - **Windows-only token encryption** (DPAPI). Other platforms need a keychain
   backend and currently refuse to store tokens rather than write plaintext.
-- Fixed during hardening (previously real misses): briefing days used UTC
-  boundaries (a 10 PM email briefed on tomorrow's date) and future calendar
-  events were outside the fetch window. Both have regression tests. A
-  cross-source dedup was also added (Google calendar-notification emails that
-  reference a briefed event are suppressed from selection, tested) — and its
-  conservatism promptly proved itself: a third-party email titled "1 event
-  happening tomorrow" that *looks* exactly like a Google agenda digest turned
-  out to be from an unrelated platform, and the dedup correctly left it
-  briefed instead of wrong-merging it.
+- Fixed after a full principal-engineer audit (all had regression tests added):
+  a briefing-day *hijack* (a standing event tomorrow could date the briefing
+  tomorrow and drop today), all-day events anchored to UTC instead of local
+  midnight, UTC clock times misleading the model's ordering, a DST-at-midnight
+  day that hard-failed, `csp: null` and an over-broad URL opener on the
+  webview, and a `Debug` impl that could have logged raw content. Earlier
+  hardening also fixed UTC day boundaries, the fetch window missing future
+  events, and added the conservative cross-source dedup — whose caution proved
+  itself when a third-party email titled "1 event happening tomorrow" (which
+  *looks* like a Google agenda digest) was correctly left briefed rather than
+  wrong-merged.
 
 ## Setup (honest version)
 
 Windows-first (token encryption is DPAPI). Prereqs: Rust (MSVC toolchain),
 Node 18+.
 
-```sh
-git clone https://github.com/ManeeshJupalle/Almanac.git && cd Almanac
+```powershell
+git clone https://github.com/ManeeshJupalle/Almanac.git; cd Almanac
 npm install
 
 # one-time model downloads (~580 MB total; inference never touches the network)
-mkdir models/minilm models/qwen2.5-0.5b-instruct
-curl -L -o models/minilm/model.onnx https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx
-curl -L -o models/minilm/tokenizer.json https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json
-curl -L -o models/qwen2.5-0.5b-instruct/model.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
-curl -L -o models/qwen2.5-0.5b-instruct/tokenizer.json https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json
+mkdir models\minilm, models\qwen2.5-0.5b-instruct
+curl.exe -L -o models\minilm\model.onnx https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/onnx/model.onnx
+curl.exe -L -o models\minilm\tokenizer.json https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main/tokenizer.json
+curl.exe -L -o models\qwen2.5-0.5b-instruct\model.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+curl.exe -L -o models\qwen2.5-0.5b-instruct\tokenizer.json https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/tokenizer.json
 ```
+
+(On macOS/Linux use `mkdir -p models/minilm models/qwen2.5-0.5b-instruct` and
+`curl` — but note token encryption is Windows-only for now; see honest misses.)
 
 Credentials (bring your own — nothing is provisioned for you):
 
@@ -194,7 +226,8 @@ Credentials (bring your own — nothing is provisioned for you):
 2. **Slack**: create an app at api.slack.com, add
    `http://localhost:8080/callback` as a redirect URL, copy the client
    id/secret.
-3. `cp .env.example .env` and fill in the Slack values.
+3. `Copy-Item .env.example .env` (PowerShell; `cp` on macOS/Linux) and fill in
+   the Slack values.
 
 First run:
 
@@ -236,15 +269,16 @@ cargo run -p almanac-core -- refresh-google     # forced token refresh with fing
 
 | Layer | Choice |
 |---|---|
-| Core engine | Rust, headless crate (`almanac-core`), 47 tests |
-| Desktop shell | Tauri v2 (thin IPC client, no engine logic) |
+| Core engine | Rust, headless crate (`almanac-core`), 54 tests |
+| Desktop shell | Tauri v2 (thin IPC client, no engine logic; strict CSP, scoped opener) |
 | UI | React + Vite, hand-rolled CSS |
 | Store | SQLite (rusqlite, embedded migrations, FK-grounded) |
 | Extraction | all-MiniLM-L6-v2 ONNX via tract-onnx (pure Rust) |
 | Synthesis | Qwen2.5-0.5B-Instruct GGUF via candle (pure Rust) |
 | Tokens | Windows DPAPI, encrypted at rest |
+| CI | Linux + Windows (DPAPI) test jobs, workspace build, `cargo`/`npm audit` |
 
 Built in six phases (scaffold → payload-first fixtures → adapters →
-extraction → synthesis → UI → ship), each committed after its acceptance
-gates passed. `PAYLOAD_CORRECTIONS.md` and the honest misses above are part
-of the deliverable, not an apology.
+extraction → synthesis → UI → ship), then hardened against a full
+principal-engineer audit. `PAYLOAD_CORRECTIONS.md` and the honest misses above
+are part of the deliverable, not an apology.

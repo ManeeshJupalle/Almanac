@@ -56,7 +56,25 @@ fn main() -> ExitCode {
         }),
         _ => {
             eprintln!(
-                "usage: almanac-core <--self-check|smoke-adapters|refresh-google|refresh-slack|extract-fixtures|extract-live|synthesize [YYYY-MM-DD]|e2e-fixtures>"
+                "usage: almanac-core <command>\n\
+                 \n\
+                 App / pipeline:\n\
+                 \x20 --self-check              db + migrations sanity (prints \"core ok\")\n\
+                 \x20 extract-fixtures         offline: fixtures -> classified items\n\
+                 \x20 e2e-fixtures             offline: fixtures -> extraction -> briefing\n\
+                 \x20 synthesize [YYYY-MM-DD]  synthesize a briefing for a local day\n\
+                 \x20 live-briefing            full live chain (adapters -> UI-shaped briefing)\n\
+                 \x20 extract-live             live smoke: adapters -> extraction -> SQLite\n\
+                 \x20 smoke-adapters           live smoke: fetch a window from all 3 sources\n\
+                 \n\
+                 Auth:\n\
+                 \x20 refresh-google           forced Google token refresh (fingerprint evidence)\n\
+                 \x20 refresh-slack            Slack token refresh / live validation\n\
+                 \n\
+                 Diagnostics:\n\
+                 \x20 db-dump                  recent extracted items (local console)\n\
+                 \x20 slack-permalink <ch> <ts>  compare our deep link vs chat.getPermalink\n\
+                 \x20 debug-expire-google-token  invalidate the stored token (test utility)"
             );
             return ExitCode::from(2);
         }
