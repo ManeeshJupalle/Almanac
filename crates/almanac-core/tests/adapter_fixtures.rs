@@ -104,11 +104,15 @@ fn gcal_both_rfc3339_flavors_parse() {
 }
 
 #[test]
-fn gcal_all_day_events_use_the_date_arm_of_the_union() {
+fn gcal_all_day_events_anchor_to_local_day_not_utc_midnight() {
     // C5: all-day events carry start.date instead of start.dateTime.
+    // F-2 fix: the instant must fall on the event's date in the USER'S LOCAL
+    // timezone (UTC midnight would land on the previous day in the Americas).
+    use chrono::Local;
     let event = serde_json::json!({ "start": { "date": "2026-07-08" } });
     let ts = gcal::event_start_utc(&event).unwrap();
-    assert_eq!((ts.year(), ts.month(), ts.day()), (2026, 7, 8));
+    let local_date = ts.with_timezone(&Local).date_naive();
+    assert_eq!(local_date, "2026-07-08".parse::<chrono::NaiveDate>().unwrap());
 }
 
 // ---------------------------------------------------------------- slack ----

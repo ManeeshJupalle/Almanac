@@ -19,6 +19,8 @@ type Briefing = {
   rationale: string;
   createdAt: string;
   items: BriefingItem[];
+  preview: BriefingItem[];
+  previewDate: string;
 };
 
 type SourceStatus = {
@@ -196,6 +198,36 @@ function App() {
                   </li>
                 ))}
               </ol>
+            )}
+
+            {briefing.preview.length > 0 && (
+              <section className="preview" aria-label="Coming up tomorrow">
+                <h2 className="preview-head">
+                  Coming up
+                  <span className="preview-date">
+                    {new Date(briefing.previewDate + "T00:00:00").toLocaleDateString(undefined, {
+                      weekday: "long",
+                      month: "long",
+                      day: "numeric",
+                    })}
+                  </span>
+                </h2>
+                <ul className="preview-list">
+                  {briefing.preview.map((item) => (
+                    <li key={`${item.source}:${item.nativeId}`}>
+                      <button
+                        className="preview-entry"
+                        onClick={() => openSource(item)}
+                        title={`Open in ${SOURCE_LABEL[item.source]} — ${item.deepLink}`}
+                      >
+                        <span className="preview-when">{timeOf(item.occurredAt)}</span>
+                        <span className="preview-summary">{item.summary}</span>
+                        <span className="chip">{SOURCE_LABEL[item.source]}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             )}
           </>
         ) : (

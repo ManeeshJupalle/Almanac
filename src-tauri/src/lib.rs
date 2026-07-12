@@ -28,6 +28,10 @@ pub struct BriefingView {
     pub rationale: String,
     pub created_at: String,
     pub items: Vec<BriefingItemView>,
+    /// Tomorrow's events, shown in a separate "Coming up" preview.
+    pub preview: Vec<BriefingItemView>,
+    /// The local date the preview covers (briefed day + 1), YYYY-MM-DD.
+    pub preview_date: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -38,25 +42,32 @@ pub struct SourceStatusView {
     pub detail: String,
 }
 
+fn item_to_view(item: almanac_core::db::StoredBriefingItem) -> BriefingItemView {
+    BriefingItemView {
+        position: item.position,
+        kind: item.kind.as_str().to_string(),
+        summary: item.summary,
+        occurred_at: item.occurred_at.to_rfc3339(),
+        source: item.provenance.source.to_string(),
+        native_id: item.provenance.native_id,
+        deep_link: item.provenance.deep_link,
+    }
+}
+
 fn to_view(stored: almanac_core::db::StoredBriefing) -> BriefingView {
+    let preview_date = stored
+        .briefing_date
+        .succ_opt()
+        .map(|d| d.to_string())
+        .unwrap_or_default();
     BriefingView {
         briefing_date: stored.briefing_date.to_string(),
         backend_id: stored.backend_id,
         rationale: stored.rationale,
         created_at: stored.created_at,
-        items: stored
-            .items
-            .into_iter()
-            .map(|item| BriefingItemView {
-                position: item.position,
-                kind: item.kind.as_str().to_string(),
-                summary: item.summary,
-                occurred_at: item.occurred_at.to_rfc3339(),
-                source: item.provenance.source.to_string(),
-                native_id: item.provenance.native_id,
-                deep_link: item.provenance.deep_link,
-            })
-            .collect(),
+        items: stored.items.into_iter().map(item_to_view).collect(),
+        preview: stored.preview.into_iter().map(item_to_view).collect(),
+        preview_date,
     }
 }
 

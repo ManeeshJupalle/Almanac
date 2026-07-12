@@ -374,6 +374,81 @@ body {
   opacity: 1;
 }
 
+/* ------------------------------------------------------------- preview ---- */
+
+.preview {
+  margin-top: 2.4rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--rule);
+}
+
+.preview-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 1rem;
+}
+
+.preview-date {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  color: var(--gold);
+}
+
+.preview-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.preview-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 0.9rem;
+  width: 100%;
+  text-align: left;
+  padding: 0.6rem 0.6rem;
+  background: none;
+  border: none;
+  font: inherit;
+  color: var(--ink-soft);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+
+.preview-entry:hover,
+.preview-entry:focus-visible {
+  background: var(--card);
+  color: var(--ink);
+}
+
+.preview-entry:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
+.preview-when {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--gold);
+  min-width: 4.5rem;
+}
+
+.preview-summary {
+  flex: 1;
+  font-size: 0.98rem;
+}
+
 /* -------------------------------------------------------------- states ---- */
 
 .state {

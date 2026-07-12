@@ -28,6 +28,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "briefings",
         sql: include_str!("../migrations/0003_briefings.sql"),
     },
+    Migration {
+        version: 4,
+        name: "briefing_sections",
+        sql: include_str!("../migrations/0004_briefing_sections.sql"),
+    },
 ];
 
 /// Open the database at `path`, creating parent directories and the file on
@@ -110,6 +115,43 @@ pub fn insert_extracted_item(
     )
     .context("persisting extracted item (a foreign-key failure here means ungrounded provenance)")?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Choose which day to brief, given the user's local `today` (post-audit F-1
+/// fix). Rule: brief TODAY when today has a non-noise item; otherwise fall
+/// back to the most recent PRIOR local day that has one; never a future day
+/// (a standing event tomorrow must not hijack the briefing). When there is no
+/// content today or earlier, still return `today` — the day briefs empty and
+/// the tomorrow-preview can populate.
+///
+/// Run-scoped (F-11): only the latest extraction per source object counts, so
+/// an item reclassified to noise no longer nominates its day.
+pub fn pick_briefing_day(conn: &Connection, today: chrono::NaiveDate) -> Result<chrono::NaiveDate> {
+    let mut stmt = conn.prepare(
+        "SELECT so.occurred_at
+         FROM extracted_items ei
+         JOIN source_objects so
+           ON so.source = ei.source AND so.native_id = ei.native_id
+         WHERE ei.kind != 'noise'
+           AND ei.id = (SELECT MAX(id) FROM extracted_items
+                        WHERE source = ei.source AND native_id = ei.native_id)",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+    let mut best_prior: Option<chrono::NaiveDate> = None;
+    for row in rows {
+        let local_date = chrono::DateTime::parse_from_rfc3339(&row?)?
+            .with_timezone(&chrono::Local)
+            .date_naive();
+        if local_date == today {
+            return Ok(today); // today has content — brief today
+        }
+        if local_date < today {
+            best_prior = Some(best_prior.map_or(local_date, |b| b.max(local_date)));
+        }
+        // future days are ignored for day-selection (preview handles them)
+    }
+    Ok(best_prior.unwrap_or(today))
 }
 
 /// UTC bounds of a calendar day in an arbitrary timezone (Phase 6: briefing
@@ -218,7 +260,10 @@ pub struct StoredBriefing {
     pub backend_id: String,
     pub rationale: String,
     pub created_at: String,
+    /// The briefed day's sequenced plan.
     pub items: Vec<StoredBriefingItem>,
+    /// Tomorrow's events (chronological), shown in a separate preview.
+    pub preview: Vec<StoredBriefingItem>,
 }
 
 #[derive(Debug)]
@@ -243,11 +288,16 @@ pub fn insert_briefing(
         (briefing_date.to_string(), backend_id, &briefing.rationale),
     )?;
     let briefing_id = tx.last_insert_rowid();
-    for (position, item) in briefing.sequence.iter().enumerate() {
+    // `position` is the per-briefing PK; preview rows continue after the plan
+    // so they stay unique, and the `section` column keeps them distinct on read.
+    let base = briefing.sequence.len();
+    let plan = briefing.sequence.iter().enumerate().map(|(i, it)| (i, it, "today"));
+    let preview = briefing.preview.iter().enumerate().map(|(i, it)| (base + i, it, "preview"));
+    for (position, item, section) in plan.chain(preview) {
         tx.execute(
             "INSERT INTO briefing_items
-                 (briefing_id, position, source, native_id, kind, summary, occurred_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (briefing_id, position, source, native_id, kind, summary, occurred_at, section)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             (
                 briefing_id,
                 position as i64,
@@ -256,6 +306,7 @@ pub fn insert_briefing(
                 item.kind.as_str(),
                 &item.summary,
                 item.occurred_at.to_rfc3339(),
+                section,
             ),
         )
         .context("persisting briefing item (FK failure here means ungrounded provenance)")?;
@@ -288,7 +339,7 @@ pub fn latest_briefing(conn: &Connection) -> Result<Option<StoredBriefing>> {
 
     let mut stmt = conn.prepare(
         "SELECT bi.position, bi.kind, bi.summary, bi.occurred_at,
-                bi.source, bi.native_id, so.deep_link
+                bi.source, bi.native_id, so.deep_link, bi.section
          FROM briefing_items bi
          JOIN source_objects so
            ON so.source = bi.source AND so.native_id = bi.native_id
@@ -304,13 +355,15 @@ pub fn latest_briefing(conn: &Connection) -> Result<Option<StoredBriefing>> {
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
         ))
     })?;
 
     let mut items = Vec::new();
+    let mut preview = Vec::new();
     for row in rows {
-        let (position, kind, summary, occurred_at, source, native_id, deep_link) = row?;
-        items.push(StoredBriefingItem {
+        let (position, kind, summary, occurred_at, source, native_id, deep_link, section) = row?;
+        let item = StoredBriefingItem {
             position,
             kind: crate::extract::ItemKind::parse(&kind)
                 .with_context(|| format!("unknown kind '{kind}' in briefing_items"))?,
@@ -323,7 +376,12 @@ pub fn latest_briefing(conn: &Connection) -> Result<Option<StoredBriefing>> {
                 native_id,
                 deep_link,
             },
-        });
+        };
+        if section == "preview" {
+            preview.push(item);
+        } else {
+            items.push(item);
+        }
     }
     Ok(Some(StoredBriefing {
         id,
@@ -332,6 +390,7 @@ pub fn latest_briefing(conn: &Connection) -> Result<Option<StoredBriefing>> {
         rationale,
         created_at,
         items,
+        preview,
     }))
 }
 

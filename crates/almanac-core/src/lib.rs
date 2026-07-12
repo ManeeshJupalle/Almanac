@@ -59,12 +59,16 @@ pub fn models_dir() -> Result<PathBuf> {
 /// Engine logic lives HERE — the UI shell only calls this via IPC.
 pub async fn live_briefing() -> Result<db::StoredBriefing> {
     use adapters::SourceAdapter;
-    // The window reaches one day FORWARD: a daily briefing must include
-    // today's upcoming calendar events, not just what already happened.
-    let window = types::TimeWindow {
-        start: chrono::Utc::now() - chrono::Duration::days(7),
-        end: chrono::Utc::now() + chrono::Duration::days(1),
-    };
+    // The window reaches through the END OF TOMORROW (local) so both today's
+    // remaining events and tomorrow's full day (for the preview) are fetched,
+    // regardless of compose time. Start is 7 local days back.
+    let today = chrono::Local::now().date_naive();
+    let (start, _) = db::day_bounds(today - chrono::Duration::days(7), &chrono::Local)?;
+    let (_, end) = db::day_bounds(
+        today.succ_opt().context("date overflow computing fetch window")?,
+        &chrono::Local,
+    )?;
+    let window = types::TimeWindow { start, end };
 
     let mut objects = Vec::new();
     let mut gmail = adapters::gmail::GmailAdapter::from_env()?;
@@ -88,26 +92,11 @@ pub async fn live_briefing() -> Result<db::StoredBriefing> {
         db::insert_extracted_item(&conn, item)?;
     }
 
-    // Brief the most recent LOCAL day that has a non-noise item (Phase 6:
-    // day boundaries follow the user's timezone, not UTC).
-    let latest: Option<String> = {
-        use rusqlite::OptionalExtension;
-        conn.query_row(
-            "SELECT so.occurred_at
-             FROM extracted_items ei
-             JOIN source_objects so
-               ON so.source = ei.source AND so.native_id = ei.native_id
-             WHERE ei.kind != 'noise'
-             ORDER BY datetime(so.occurred_at) DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?
-    };
-    let latest = latest.context("no non-noise items found in the last 7 days — nothing to brief")?;
-    let date = chrono::DateTime::parse_from_rfc3339(&latest)?
-        .with_timezone(&chrono::Local)
-        .date_naive();
+    // Brief TODAY's local day (post-audit F-1 fix): tomorrow's events no
+    // longer hijack the briefing date — they surface in the preview instead.
+    // Falls back to the most recent prior day with content; never a future
+    // day. Run-scoped so reclassified items don't nominate a stale day (F-11).
+    let date = db::pick_briefing_day(&conn, today)?;
 
     let backend = synth::local_llm::LocalLlmBackend::load(&models.join("qwen2.5-0.5b-instruct"))?;
     let ctx = synth::DayContext { date, now: chrono::Utc::now() };

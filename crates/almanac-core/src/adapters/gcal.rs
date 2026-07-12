@@ -3,7 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use serde_json::Value;
 
 use crate::auth::GoogleAuth;
@@ -131,9 +131,19 @@ pub fn event_start_utc(event: &Value) -> Result<DateTime<Utc>> {
             .with_timezone(&Utc));
     }
     if let Some(d) = start.get("date").and_then(Value::as_str) {
+        // All-day event (F-2 fix): anchor to LOCAL midnight, not UTC midnight.
+        // UTC midnight is the previous local evening in the Americas, which
+        // briefed all-day events (deadlines, OOO) a day early.
         let date: NaiveDate = d.parse().with_context(|| format!("unparseable event date: {d}"))?;
         let midnight = date.and_hms_opt(0, 0, 0).context("invalid midnight")?;
-        return Ok(DateTime::from_naive_utc_and_offset(midnight, Utc));
+        let local = Local
+            .from_local_datetime(&midnight)
+            .earliest()
+            // DST spring-forward can skip local midnight; the day still starts,
+            // so fall back to the first representable instant that morning.
+            .or_else(|| Local.from_local_datetime(&(midnight + chrono::Duration::hours(1))).earliest())
+            .with_context(|| format!("no representable local start for all-day event {d}"))?;
+        return Ok(local.with_timezone(&Utc));
     }
     bail!("calendar event start has neither dateTime nor date")
 }

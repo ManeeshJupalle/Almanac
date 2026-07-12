@@ -90,6 +90,7 @@ fn validator_rejects_a_deliberately_ungrounded_item() {
             planned("9999999999.000000", when), // never fetched, never stored
         ],
         rationale: "made up".into(),
+        preview: vec![],
     };
     let err = validate_briefing(&conn, &briefing, &[real]).unwrap_err();
     let msg = format!("{err:#}");
@@ -110,6 +111,7 @@ impl SynthesisBackend for HallucinatingBackend {
         Ok(Briefing {
             sequence: vec![planned("6666666666.000000", ts("2026-07-11T09:00:00Z"))],
             rationale: "trust me".into(),
+            preview: vec![],
         })
     }
 }
@@ -138,6 +140,7 @@ fn validator_rejects_duplicate_planned_items() {
     let briefing = Briefing {
         sequence: vec![planned("1.1", when), planned("1.1", when)],
         rationale: "twice".into(),
+        preview: vec![],
     };
     assert!(validate_briefing(&conn, &briefing, &[real]).is_err());
 }
@@ -388,6 +391,115 @@ fn dedup_is_conservative_no_gcal_items_or_no_match_keeps_everything() {
         almanac_core::synth::dedup_calendar_email_duplicates(&conn, vec![ordinary]).unwrap();
     assert_eq!(suppressed, 0);
     assert_eq!(kept.len(), 1);
+}
+
+// -------------------------------- today-vs-tomorrow (F-1) + preview ----
+
+/// Orders items in input order (no model) so pipeline behavior can be tested.
+struct IdentityBackend;
+
+#[async_trait]
+impl SynthesisBackend for IdentityBackend {
+    fn backend_id(&self) -> &str {
+        "test-identity"
+    }
+    async fn synthesize(&self, items: Vec<ExtractedItem>, _ctx: DayContext) -> Result<Briefing> {
+        let sequence = items
+            .iter()
+            .map(|i| PlannedItem {
+                provenance: i.provenance().clone(),
+                kind: i.kind(),
+                summary: i.summary().to_string(),
+                occurred_at: i.occurred_at(),
+            })
+            .collect();
+        Ok(Briefing { sequence, rationale: "identity".into(), preview: vec![] })
+    }
+}
+
+/// A UTC instant that is local noon on `date` (avoids DST-midnight edges).
+fn local_noon(date: NaiveDate) -> DateTime<Utc> {
+    use chrono::TimeZone;
+    chrono::Local
+        .from_local_datetime(&date.and_hms_opt(12, 0, 0).unwrap())
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
+#[test]
+fn pick_briefing_day_prefers_today_and_never_a_future_day() {
+    let (_dir, conn) = test_db();
+    let today = chrono::Local::now().date_naive();
+    let tomorrow = today.succ_opt().unwrap();
+
+    // Today's action + tomorrow's event (the F-1 hijack scenario).
+    store(&conn, &source_object("t.1", local_noon(today)),
+        &item("t.1", ItemKind::ActionNeeded, local_noon(today)));
+    store(&conn, &source_object("m.1", local_noon(tomorrow)),
+        &item("m.1", ItemKind::Event, local_noon(tomorrow)));
+
+    // Must be TODAY, not tomorrow.
+    assert_eq!(almanac_core::db::pick_briefing_day(&conn, today).unwrap(), today);
+}
+
+#[test]
+fn pick_briefing_day_falls_back_to_prior_never_future() {
+    let (_dir, conn) = test_db();
+    let today = chrono::Local::now().date_naive();
+    let tomorrow = today.succ_opt().unwrap();
+    let two_days_ago = today.pred_opt().unwrap().pred_opt().unwrap();
+
+    // Nothing today; a future event and a prior action.
+    store(&conn, &source_object("future.1", local_noon(tomorrow)),
+        &item("future.1", ItemKind::Event, local_noon(tomorrow)));
+    store(&conn, &source_object("past.1", local_noon(two_days_ago)),
+        &item("past.1", ItemKind::ActionNeeded, local_noon(two_days_ago)));
+
+    // The prior day, never the future one.
+    assert_eq!(almanac_core::db::pick_briefing_day(&conn, today).unwrap(), two_days_ago);
+}
+
+#[test]
+fn pick_briefing_day_ignores_items_reclassified_to_noise() {
+    // F-11: an item first classified action, later re-extracted as noise,
+    // must not nominate its day.
+    let (_dir, conn) = test_db();
+    let today = chrono::Local::now().date_naive();
+    let when = local_noon(today);
+    almanac_core::db::insert_source_object(&conn, &source_object("r.1", when)).unwrap();
+    almanac_core::db::insert_extracted_item(&conn, &item("r.1", ItemKind::ActionNeeded, when)).unwrap();
+    almanac_core::db::insert_extracted_item(&conn, &item("r.1", ItemKind::Noise, when)).unwrap();
+
+    // Today now has no non-noise item → today is not nominated by content;
+    // with nothing else present, the picker still returns today (empty brief).
+    assert_eq!(almanac_core::db::pick_briefing_day(&conn, today).unwrap(), today);
+    // And run-scoped selection yields nothing for today.
+    let (s, e) = almanac_core::db::day_bounds(today, &chrono::Local).unwrap();
+    let inputs = almanac_core::db::briefing_inputs_range(&conn, s, e).unwrap();
+    assert!(inputs.iter().all(|i| i.kind() == ItemKind::Noise));
+}
+
+#[tokio::test]
+async fn tomorrows_events_go_to_preview_not_todays_plan() {
+    let (_dir, conn) = test_db();
+    let today = chrono::Local::now().date_naive();
+    let tomorrow = today.succ_opt().unwrap();
+
+    store(&conn, &source_object("today.act", local_noon(today)),
+        &item("today.act", ItemKind::ActionNeeded, local_noon(today)));
+    store(&conn, &source_object("tom.evt", local_noon(tomorrow)),
+        &item("tom.evt", ItemKind::Event, local_noon(tomorrow)));
+
+    let ctx = DayContext { date: today, now: Utc::now() };
+    let briefing = generate_briefing(&conn, &IdentityBackend, ctx).await.unwrap();
+
+    // Today's plan contains ONLY today's item.
+    assert_eq!(briefing.sequence.len(), 1);
+    assert_eq!(briefing.sequence[0].provenance.native_id, "today.act");
+    // Tomorrow's event is in the preview, not the plan.
+    assert_eq!(briefing.preview.len(), 1);
+    assert_eq!(briefing.preview[0].provenance.native_id, "tom.evt");
+    assert_eq!(briefing.preview[0].kind, ItemKind::Event);
 }
 
 // --------------------------------------------------------- empty day ----

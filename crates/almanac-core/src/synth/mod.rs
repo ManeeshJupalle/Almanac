@@ -44,6 +44,10 @@ pub struct PlannedItem {
 pub struct Briefing {
     pub sequence: Vec<PlannedItem>,
     pub rationale: String,
+    /// Forward-looking preview: events on the day AFTER the briefed day,
+    /// in chronological order (not model-sequenced). Surfaced separately so
+    /// tomorrow's standing meetings never replace or crowd today's plan.
+    pub preview: Vec<PlannedItem>,
 }
 
 /// Synthesis is swappable so local-vs-alt delta can be measured honestly.
@@ -82,6 +86,7 @@ pub async fn generate_briefing(
                 "Nothing needs your attention for {} — no commitments, events, or action items surfaced.",
                 ctx.date
             ),
+            preview: Vec::new(),
         }
     } else {
         let briefing = backend.synthesize(actionable.clone(), ctx).await?;
@@ -103,7 +108,35 @@ pub async fn generate_briefing(
             if noise.len() == 1 { " was" } else { "s were" }
         ));
     }
+
+    // Forward-looking preview: events on the day AFTER the briefed day,
+    // chronological (no model). Grounded by construction (inputs come from an
+    // INNER JOIN on source_objects) and dedup'd the same way as the plan.
+    briefing.preview = tomorrow_preview(conn, ctx.date)?;
     Ok(briefing)
+}
+
+/// Non-noise EVENTS on the local day after `date`, chronologically ordered.
+pub fn tomorrow_preview(
+    conn: &Connection,
+    date: chrono::NaiveDate,
+) -> Result<Vec<PlannedItem>> {
+    let next = date.succ_opt().context("date overflow computing preview day")?;
+    let (start, end) = crate::db::day_bounds(next, &chrono::Local)?;
+    let inputs = crate::db::briefing_inputs_range(conn, start, end)?;
+    let actionable: Vec<ExtractedItem> =
+        inputs.into_iter().filter(|i| i.kind() != ItemKind::Noise).collect();
+    let (deduped, _) = dedup_calendar_email_duplicates(conn, actionable)?;
+    Ok(deduped
+        .iter()
+        .filter(|i| i.kind() == ItemKind::Event)
+        .map(|i| PlannedItem {
+            provenance: i.provenance().clone(),
+            kind: i.kind(),
+            summary: i.summary().to_string(),
+            occurred_at: i.occurred_at(),
+        })
+        .collect())
 }
 
 /// Phase 6 cross-source dedup, deliberately HIGH-PRECISION (a wrong merge is
@@ -345,7 +378,8 @@ pub fn briefing_from_order(items: &[ExtractedItem], order: Vec<usize>) -> Result
         });
     }
     let rationale = templated_rationale(&sequence);
-    Ok(Briefing { sequence, rationale })
+    // preview is filled in by generate_briefing after ordering.
+    Ok(Briefing { sequence, rationale, preview: Vec::new() })
 }
 
 #[cfg(test)]

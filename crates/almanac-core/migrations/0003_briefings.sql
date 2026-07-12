@@ -7,7 +7,7 @@
 
 CREATE TABLE briefings (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    briefing_date TEXT NOT NULL,  -- UTC day briefed, YYYY-MM-DD
+    briefing_date TEXT NOT NULL,  -- local day briefed, YYYY-MM-DD
     backend_id    TEXT NOT NULL,
     rationale     TEXT NOT NULL,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
