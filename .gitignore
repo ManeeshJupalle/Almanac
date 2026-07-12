@@ -1,3 +1,7 @@
+# Local-only docs (kept on disk, not published to the repo)
+BUILD_PHASES.md
+AUDIT.md
+
 # Rust
 /target
 **/target
