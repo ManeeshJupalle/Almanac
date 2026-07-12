@@ -90,6 +90,20 @@ function App() {
 
   const openSource = useCallback(async (item: BriefingItem) => {
     try {
+      // Defense in depth (audit F-4): the opener capability is already scoped
+      // to the source hosts, but re-check here so a bad deep link is refused
+      // in the renderer before it ever reaches the OS.
+      const url = new URL(item.deepLink);
+      const hostAllowed =
+        url.protocol === "https:" &&
+        (url.hostname === "mail.google.com" ||
+          url.hostname === "www.google.com" ||
+          url.hostname === "calendar.google.com" ||
+          url.hostname.endsWith(".slack.com"));
+      if (!hostAllowed) {
+        setError(`Refused to open an unexpected link: ${item.deepLink}`);
+        return;
+      }
       await openUrl(item.deepLink);
     } catch (e) {
       setError(`Could not open source: ${String(e)}`);

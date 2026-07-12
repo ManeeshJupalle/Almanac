@@ -51,7 +51,10 @@ pub struct ProvenanceRef {
 
 /// Raw payload from a source. Stays on this machine — no `Serialize` impl,
 /// on purpose. Local consumers (extraction, local SQLite) use `as_json()`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is manually redacted (audit F-12): a stray `{:?}`/`dbg!` in an
+/// error path must never export message bodies to logs. Print size only.
+#[derive(Clone)]
 pub struct RawContent(serde_json::Value);
 
 impl RawContent {
@@ -65,12 +68,30 @@ impl RawContent {
     }
 }
 
+impl std::fmt::Debug for RawContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RawContent(<{} bytes, redacted>)", self.0.to_string().len())
+    }
+}
+
 /// A source object always carries a stable provenance handle (ARCHITECTURE.md).
-#[derive(Debug, Clone)]
+/// `Debug` is manual (F-12) so the redacted `RawContent` view is preserved and
+/// no future derive can widen it to print raw content.
+#[derive(Clone)]
 pub struct SourceObject {
     pub provenance: ProvenanceRef,
     pub raw: RawContent, // stays local
     pub occurred_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for SourceObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceObject")
+            .field("provenance", &self.provenance)
+            .field("occurred_at", &self.occurred_at)
+            .field("raw", &self.raw) // RawContent's redacted Debug
+            .finish()
+    }
 }
 
 /// Half-open time window [start, end) that adapters fetch.
