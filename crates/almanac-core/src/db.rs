@@ -6,7 +6,10 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::OptionalExtension;
+/// Re-exported so IPC/shell code can name the connection type without taking a
+/// direct rusqlite dependency (keeps the "core owns storage" boundary).
+pub use rusqlite::Connection;
 
 /// A single schema migration, embedded at compile time.
 pub struct Migration {
@@ -32,6 +35,11 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "briefing_sections",
         sql: include_str!("../migrations/0004_briefing_sections.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "action_layer",
+        sql: include_str!("../migrations/0005_action_layer.sql"),
     },
 ];
 
@@ -473,9 +481,12 @@ mod tests {
         assert_eq!(
             tables,
             vec![
+                "action_proposals".to_string(),
+                "audit_records".to_string(),
                 "briefing_items".to_string(),
                 "briefings".to_string(),
                 "extracted_items".to_string(),
+                "proposal_evidence".to_string(),
                 "schema_migrations".to_string(),
                 "source_objects".to_string(),
             ]

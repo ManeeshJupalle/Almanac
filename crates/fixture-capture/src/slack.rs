@@ -5,7 +5,11 @@ use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde_json::Value;
 
-const USER_SCOPES: &str = "channels:read,channels:history";
+// Phase 2.0 adds the WRITE user scope chat:write (executors only — see
+// almanac-core::act::executors for the A2 discipline). The scope must ALSO be
+// added under "User Token Scopes" on the Slack app config (api.slack.com →
+// OAuth & Permissions), then the app reinstalled, then `slack-auth` re-run.
+const USER_SCOPES: &str = "channels:read,channels:history,chat:write";
 
 pub async fn authorize() -> Result<()> {
     let client_id = crate::config::required("SLACK_CLIENT_ID")?;
@@ -115,6 +119,46 @@ async fn slack_get(method: &str, params: &[(&str, &str)], token: &str) -> Result
         bail!("{method} returned ok=false: {err} — missing scope: {needed}");
     }
     Ok(body)
+}
+
+/// Phase 2.0 payload-first capture for the WRITE path: post ONE real message
+/// to the configured private test channel and save the raw chat.postMessage
+/// response. Run BEFORE modeling any post-response struct.
+pub async fn capture_post() -> Result<()> {
+    let token = user_token()?;
+    let channel = crate::config::required("SLACK_TEST_CHANNEL").context(
+        "SLACK_TEST_CHANNEL is not set — add the channel id of a private test channel \
+         you are a member of to .env",
+    )?;
+
+    let body = serde_json::json!({
+        "channel": channel,
+        "text": "Almanac Phase 2.0 payload capture — fixturing the chat.postMessage \
+                 response. Expected exactly once per capture run.",
+    });
+    let resp = reqwest::Client::new()
+        .post("https://slack.com/api/chat.postMessage")
+        .bearer_auth(&token)
+        .header("content-type", "application/json; charset=utf-8")
+        .body(serde_json::to_vec(&body)?)
+        .send()
+        .await?;
+    let text = resp.text().await?;
+    let v: Value = serde_json::from_str(&text).context("chat.postMessage returned non-JSON")?;
+    if v.get("ok").and_then(Value::as_bool) != Some(true) {
+        let err = v.get("error").and_then(Value::as_str).unwrap_or("unknown_error");
+        if err == "missing_scope" {
+            bail!(
+                "chat.postMessage failed: missing_scope — add chat:write under \"User Token \
+                 Scopes\" on the Slack app config (api.slack.com → OAuth & Permissions), \
+                 reinstall the app, then re-run `fixture-capture slack-auth`"
+            );
+        }
+        bail!("chat.postMessage failed: {err}");
+    }
+    crate::store::save_fixture("slack_post", "post_response.json", &text)?;
+    println!("slack_post: captured post_response for channel {channel}");
+    Ok(())
 }
 
 pub async fn capture() -> Result<()> {

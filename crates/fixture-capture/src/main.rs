@@ -25,15 +25,18 @@ async fn main() -> Result<()> {
             Some("gmail") => google::capture_gmail().await,
             Some("gcal") => google::capture_gcal().await,
             Some("slack") => slack::capture().await,
+            // Phase 2.0 write-path captures (payload-first for send/post).
+            Some("gmail-send") => google::capture_gmail_send().await,
+            Some("slack-post") => slack::capture_post().await,
             Some("all") => {
                 google::capture_gmail().await?;
                 google::capture_gcal().await?;
                 slack::capture().await
             }
-            _ => bail!("usage: fixture-capture capture <gmail|gcal|slack|all>"),
+            _ => bail!("usage: fixture-capture capture <gmail|gcal|slack|gmail-send|slack-post|all>"),
         },
         _ => bail!(
-            "usage: fixture-capture <google-auth|slack-auth|capture <gmail|gcal|slack|all>>"
+            "usage: fixture-capture <google-auth|slack-auth|capture <gmail|gcal|slack|gmail-send|slack-post|all>>"
         ),
     }
 }

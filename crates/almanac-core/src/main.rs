@@ -34,6 +34,12 @@ fn main() -> ExitCode {
             Ok(())
         })(),
         Some("slack-permalink") => block_on(slack_permalink(args.get(1).cloned(), args.get(2).cloned())),
+        Some("verify-chain") => verify_chain(),
+        Some("list-proposals") => list_proposals(),
+        // Dev-only seed path (Phase 2.0): builds a test proposal from a REAL
+        // stored source object. Correlation (Phase 2.2) is the production
+        // proposer; nothing outside tests/dev calls this.
+        Some("debug-seed-proposal") => seed_proposal(args.get(1).cloned(), args.get(2).cloned()),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
             println!(
@@ -70,6 +76,13 @@ fn main() -> ExitCode {
                  Auth:\n\
                  \x20 refresh-google           forced Google token refresh (fingerprint evidence)\n\
                  \x20 refresh-slack            Slack token refresh / live validation\n\
+                 \n\
+                 Action layer (Phase 2.0):\n\
+                 \x20 verify-chain             walk + verify the hash-chained audit log\n\
+                 \x20 list-proposals           approval queue + audit tail (local console)\n\
+                 \x20 debug-seed-proposal <gmail-ack|slack-check> [native_id]\n\
+                 \x20                          DEV-ONLY: seed a test proposal from a stored\n\
+                 \x20                          source object (correlation arrives in 2.2)\n\
                  \n\
                  Diagnostics:\n\
                  \x20 db-dump                  recent extracted items (local console)\n\
@@ -418,5 +431,177 @@ async fn extract_live() -> Result<()> {
         *by_kind.entry(item.kind().as_str()).or_insert(0usize) += 1;
     }
     println!("live extraction: {} source objects → {} items; kinds: {:?}", objects.len(), items.len(), by_kind);
+    Ok(())
+}
+
+// ------------------------------------------------ action layer (2.0) ------
+
+/// Walk and verify the hash-chained audit log. Any break fails loudly.
+fn verify_chain() -> Result<()> {
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let report = almanac_core::act::audit::verify_chain(&conn)?;
+    println!(
+        "audit chain OK — {} record(s) verified (genesis .. seq {}), head hash {}",
+        report.records, report.head_seq, report.head_hash
+    );
+    Ok(())
+}
+
+/// Approval queue + audit tail (local console; drafts are our own text).
+fn list_proposals() -> Result<()> {
+    let mut conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let proposals = almanac_core::act::list_proposals(&mut conn)?;
+    println!("proposals ({}):", proposals.len());
+    for p in &proposals {
+        println!(
+            "  #{} [{}] {} — {} evidence ref(s), expires {}",
+            p.id,
+            p.state.as_str(),
+            p.kind.as_str(),
+            p.evidence.len(),
+            p.expires_at
+        );
+        if let Some(s) = &p.draft_subject {
+            println!("     subject: {s}");
+        }
+        println!("     body: {}", p.draft_body);
+        for e in &p.evidence {
+            println!(
+                "     evidence[{}]: {}:{} -> {}",
+                e.tier.as_str(),
+                e.source,
+                e.native_id,
+                e.artifact_deep_link
+            );
+        }
+    }
+    println!("audit tail (newest first):");
+    for r in almanac_core::act::audit::tail(&conn, 10)? {
+        println!(
+            "  seq {:>4}  {}  {:<10} {:<18} proposal={}",
+            r.seq,
+            r.ts,
+            r.actor,
+            r.event,
+            r.proposal_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into())
+        );
+    }
+    Ok(())
+}
+
+/// DEV-ONLY seed path (clearly marked; see dispatch comment). Builds a test
+/// proposal from a REAL stored source object so E2 holds — run
+/// `live-briefing` or `extract-live` first to populate the store.
+fn seed_proposal(which: Option<String>, native_id: Option<String>) -> Result<()> {
+    use almanac_core::act::draft::{DraftingBackend, DraftRequest, TemplatedDraftingBackend};
+    use almanac_core::act::{ActionKind, ActionProposal, ActionTarget, EvidenceKind, EvidenceRef};
+    use almanac_core::types::SourceId;
+
+    let mut conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let backend = TemplatedDraftingBackend;
+
+    // Most recent stored source object of `source`, or the one named by id.
+    let pick = |conn: &rusqlite::Connection, source: &str, id: Option<&str>| -> Result<(String, String, String)> {
+        let (sql, param): (&str, &str) = match id {
+            Some(id) => (
+                "SELECT native_id, deep_link, occurred_at FROM source_objects
+                 WHERE source = ?1 AND native_id = ?2",
+                id,
+            ),
+            None => (
+                "SELECT native_id, deep_link, occurred_at FROM source_objects
+                 WHERE source = ?1 ORDER BY datetime(occurred_at) DESC LIMIT 1",
+                "",
+            ),
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let row = if param.is_empty() {
+            stmt.query_row([source], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        } else {
+            stmt.query_row([source, param], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        };
+        row.with_context(|| format!("no stored {source} source object — fetch first (extract-live)"))
+    };
+
+    let (kind_label, id) = match which.as_deref() {
+        Some("gmail-ack") => {
+            let (native_id, deep_link, occurred_at) =
+                pick(&conn, "gmail", native_id.as_deref())?;
+            let raw = almanac_core::db::source_raw_json(&conn, SourceId::Gmail, &native_id)?
+                .context("stored gmail object has no raw payload")?;
+            let payload = raw.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+            let subject = almanac_core::adapters::gmail::header_values(&payload, "Subject")
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            let draft = backend.draft(&DraftRequest::AckReply { original_subject: subject })?;
+            let evidence = vec![EvidenceRef {
+                kind: EvidenceKind::Message,
+                source: SourceId::Gmail,
+                native_id: native_id.clone(),
+                deep_link: Some(deep_link),
+                observed_at: chrono::DateTime::parse_from_rfc3339(&occurred_at)?
+                    .with_timezone(&chrono::Utc),
+            }];
+            let proposal = ActionProposal::new(
+                ActionKind::GmailReply,
+                ActionTarget::GmailThread { message_native_id: native_id },
+                draft,
+                evidence,
+                backend.backend_id(),
+            )?;
+            let id = almanac_core::act::insert_proposal(
+                &mut conn,
+                &proposal,
+                "dev-seed",
+                chrono::Duration::hours(24),
+            )?;
+            ("gmail-ack reply", id)
+        }
+        Some("slack-check") => {
+            let channel = std::env::var("SLACK_TEST_CHANNEL").context(
+                "SLACK_TEST_CHANNEL is not set — add it to .env (the channel id of a \
+                 private test channel you are a member of)",
+            )?;
+            let (native_id, deep_link, occurred_at) =
+                pick(&conn, "slack", native_id.as_deref())?;
+            let draft = backend.draft(&DraftRequest::SlackCheckInPost)?;
+            let evidence = vec![EvidenceRef {
+                kind: EvidenceKind::Message,
+                source: SourceId::Slack,
+                native_id,
+                deep_link: Some(deep_link),
+                observed_at: chrono::DateTime::parse_from_rfc3339(&occurred_at)?
+                    .with_timezone(&chrono::Utc),
+            }];
+            let proposal = ActionProposal::new(
+                ActionKind::SlackPost,
+                ActionTarget::SlackChannel { channel_id: channel },
+                draft,
+                evidence,
+                backend.backend_id(),
+            )?;
+            let id = almanac_core::act::insert_proposal(
+                &mut conn,
+                &proposal,
+                "dev-seed",
+                chrono::Duration::hours(24),
+            )?;
+            ("slack check-in post", id)
+        }
+        _ => anyhow::bail!("usage: debug-seed-proposal <gmail-ack|slack-check> [native_id]"),
+    };
+
+    let stored = almanac_core::act::load_proposal(&conn, id)?;
+    let rendered = match stored.kind {
+        ActionKind::GmailReply => {
+            almanac_core::act::executors::render_gmail_reply(&conn, &stored)?
+        }
+        ActionKind::SlackPost => almanac_core::act::executors::render_slack_post(&stored)?,
+    };
+    println!("seeded {kind_label} as proposal #{id} (state: proposed)");
+    println!("dry-run ({} bytes to {}):", rendered.api_body.len(), rendered.endpoint);
+    println!("{}", rendered.display);
+    println!("\napprove it in the app's approval queue (or reject it).");
     Ok(())
 }

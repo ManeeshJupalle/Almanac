@@ -29,6 +29,41 @@ type SourceStatus = {
   detail: string;
 };
 
+type Evidence = {
+  tier: "hard" | "soft";
+  kind: string;
+  source: string;
+  nativeId: string;
+  deepLink: string;
+  observedAt: string;
+};
+
+type Proposal = {
+  id: number;
+  kind: "gmail_reply" | "slack_post";
+  state:
+    | "proposed"
+    | "approved"
+    | "rejected"
+    | "expired"
+    | "executed"
+    | "execution_failed";
+  subject: string | null;
+  body: string;
+  assertsWorkDone: boolean;
+  backendId: string;
+  createdAt: string;
+  expiresAt: string;
+  dryRun: string;
+  receipt: string | null;
+  evidence: Evidence[];
+};
+
+const PROPOSAL_KIND_LABEL: Record<Proposal["kind"], string> = {
+  gmail_reply: "Gmail reply",
+  slack_post: "Slack post",
+};
+
 const KIND_LABEL: Record<BriefingItem["kind"], string> = {
   event: "Event",
   action_needed: "Action",
@@ -55,6 +90,22 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [composing, setComposing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [chainStatus, setChainStatus] = useState<string | null>(null);
+
+  const loadProposals = useCallback(async () => {
+    try {
+      const [queue, chain] = await Promise.all([
+        invoke<Proposal[]>("list_proposals"),
+        invoke<string>("verify_audit_chain"),
+      ]);
+      setProposals(queue);
+      setChainStatus(chain);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -64,12 +115,36 @@ function App() {
       ]);
       setStatuses(status);
       setBriefing(stored);
+      await loadProposals();
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadProposals]);
+
+  const decide = useCallback(
+    async (id: number, action: "approve" | "reject" | "execute") => {
+      setBusyId(id);
+      setError(null);
+      try {
+        const cmd =
+          action === "approve"
+            ? "approve_proposal"
+            : action === "reject"
+              ? "reject_proposal"
+              : "execute_proposal";
+        await invoke<string>(cmd, { id });
+        await loadProposals();
+      } catch (e) {
+        setError(String(e));
+        await loadProposals();
+      } finally {
+        setBusyId(null);
+      }
+    },
+    [loadProposals],
+  );
 
   useEffect(() => {
     refresh();
@@ -277,11 +352,104 @@ function App() {
             )}
           </div>
         )}
+
+        {!loading && proposals.length > 0 && (
+          <section className="queue" aria-label="Approval queue">
+            <h2 className="queue-head">
+              Approval queue
+              <span className="queue-sub">
+                nothing is sent until you approve it — you approve the exact
+                bytes shown
+              </span>
+            </h2>
+            <ul className="proposal-list">
+              {proposals.map((p) => (
+                <li key={p.id} className={`proposal state-${p.state}`}>
+                  <div className="proposal-top">
+                    <span className="proposal-kind">
+                      {PROPOSAL_KIND_LABEL[p.kind]}
+                    </span>
+                    <span className={`proposal-state chip state-chip-${p.state}`}>
+                      {p.state.replace("_", " ")}
+                    </span>
+                    {p.assertsWorkDone && (
+                      <span
+                        className="proposal-claim"
+                        title="This draft asserts work was done — it required hard evidence (E1)."
+                      >
+                        factual claim
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="evidence" aria-label="Evidence chain">
+                    {p.evidence.map((e, i) => (
+                      <button
+                        key={`${p.id}:${i}`}
+                        className={`evidence-ref tier-${e.tier}`}
+                        onClick={() =>
+                          openSource({
+                            deepLink: e.deepLink,
+                          } as unknown as BriefingItem)
+                        }
+                        title={`${e.tier} evidence — ${e.source}:${e.nativeId} — ${e.deepLink}`}
+                      >
+                        <span className="tier-badge">{e.tier}</span>
+                        <span className="evidence-kind">{e.kind}</span>
+                        <span className="open-hint">↗</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <p className="dry-run-label">
+                    Exactly what will be sent (dry run):
+                  </p>
+                  <pre className="dry-run">{p.dryRun}</pre>
+
+                  {p.receipt && (
+                    <pre className="receipt">receipt: {p.receipt}</pre>
+                  )}
+
+                  <div className="proposal-actions">
+                    {p.state === "proposed" && (
+                      <>
+                        <button
+                          className="approve"
+                          disabled={busyId === p.id}
+                          onClick={() => decide(p.id, "approve")}
+                        >
+                          Approve
+                        </button>
+                        <button
+                          className="reject"
+                          disabled={busyId === p.id}
+                          onClick={() => decide(p.id, "reject")}
+                        >
+                          Reject
+                        </button>
+                      </>
+                    )}
+                    {p.state === "approved" && (
+                      <button
+                        className="execute"
+                        disabled={busyId === p.id}
+                        onClick={() => decide(p.id, "execute")}
+                      >
+                        {busyId === p.id ? "Sending…" : "Send now"}
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </main>
 
       <footer className="colophon">
         Every briefed item links back to the exact message or event it came
         from. Raw content never leaves this machine.
+        {chainStatus && <span className="chain-status"> · {chainStatus}</span>}
       </footer>
     </div>
   );

@@ -520,3 +520,133 @@ body {
   color: var(--muted);
   text-align: center;
 }
+
+/* ---- Approval queue (Phase 2.0 action layer) ---- */
+.queue {
+  margin-top: 2.4rem;
+  border-top: 3px double var(--rule-strong);
+  padding-top: 1.4rem;
+}
+.queue-head {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 1rem;
+}
+.queue-sub {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.proposal-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+.proposal {
+  border: 1px solid var(--rule-strong);
+  border-left: 4px solid var(--rule-strong);
+  background: var(--paper-deep);
+  padding: 0.9rem 1rem;
+}
+.proposal.state-executed { border-left-color: #4f7a4f; }
+.proposal.state-rejected,
+.proposal.state-execution_failed { border-left-color: #a8542f; opacity: 0.8; }
+.proposal.state-approved { border-left-color: #9a7d2e; }
+.proposal.state-expired { opacity: 0.55; }
+.proposal-top {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.7rem;
+}
+.proposal-kind { font-weight: 700; }
+.proposal-state {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--rule-strong);
+}
+.proposal-claim {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9a7d2e;
+  border: 1px dashed #9a7d2e;
+  padding: 0.05rem 0.4rem;
+}
+.evidence {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.7rem;
+}
+.evidence-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+.evidence-ref .tier-badge {
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.evidence-ref.tier-hard .tier-badge { color: #4f7a4f; }
+.evidence-ref.tier-soft .tier-badge { color: #8a8069; }
+.dry-run-label {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.3rem;
+}
+.dry-run, .receipt {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  padding: 0.6rem 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  color: var(--ink-soft);
+}
+.receipt { margin-top: 0.5rem; color: #4f7a4f; }
+.proposal-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+}
+.proposal-actions button {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  padding: 0.4rem 1rem;
+  border: 1px solid var(--rule-strong);
+  cursor: pointer;
+  background: var(--paper);
+  color: var(--ink);
+}
+.proposal-actions .approve { border-color: #4f7a4f; color: #3c6b3c; font-weight: 700; }
+.proposal-actions .execute { border-color: #9a7d2e; color: #8a6f28; font-weight: 700; }
+.proposal-actions .reject { border-color: #a8542f; color: #a8542f; }
+.proposal-actions button:disabled { opacity: 0.5; cursor: default; }
+.chain-status { font-family: var(--font-mono); }

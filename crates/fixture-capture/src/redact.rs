@@ -10,10 +10,12 @@ use base64::Engine as _;
 use serde_json::Value;
 
 pub fn redact(source: &str, v: &mut Value) {
+    // Prefix match so write-path captures (gmail_send/, slack_post/) get the
+    // same rules as their read-path source.
     match source {
-        "gmail" => walk(v, &gmail_rule),
-        "gcal" => walk(v, &gcal_rule),
-        "slack" => walk(v, &slack_rule),
+        s if s.starts_with("gmail") => walk(v, &gmail_rule),
+        s if s.starts_with("gcal") => walk(v, &gcal_rule),
+        s if s.starts_with("slack") => walk(v, &slack_rule),
         _ => {}
     }
     scrub_residual_emails(v, "");

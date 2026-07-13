@@ -1,0 +1,44 @@
+{
+  "ok": true,
+  "channel": "C0BG797NE8P",
+  "ts": "1783901949.342459",
+  "message": {
+    "user": "U0BGKB60LH3",
+    "type": "message",
+    "ts": "1783901949.342459",
+    "bot_id": "B0BGNMSUXAN",
+    "app_id": "A0BGKB9G43X",
+    "text": "[redacted]",
+    "team": "T0BGGCSAMQB",
+    "bot_profile": {
+      "id": "B0BGNMSUXAN",
+      "app_id": "A0BGKB9G43X",
+      "name": "redacted-channel",
+      "icons": {
+        "image_36": "https://a.slack-edge.com/80588/img/plugins/app/bot_36.png",
+        "image_48": "https://a.slack-edge.com/80588/img/plugins/app/bot_48.png",
+        "image_72": "https://a.slack-edge.com/80588/img/plugins/app/service_72.png"
+      },
+      "deleted": false,
+      "updated": 1783747526,
+      "team_id": "T0BGGCSAMQB"
+    },
+    "blocks": [
+      {
+        "type": "rich_text",
+        "block_id": "Fn1Y9",
+        "elements": [
+          {
+            "type": "rich_text_section",
+            "elements": [
+              {
+                "type": "text",
+                "text": "[redacted]"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

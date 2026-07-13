@@ -7,7 +7,11 @@ use chrono::TimeZone;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const SCOPES: &str = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly";
+// Phase 2.0 adds the WRITE scope gmail.send (held by executors only in the
+// app — see almanac-core::act::executors for the A2 discipline; this crate
+// uses it once for the payload-first capture). Re-run `google-auth` after
+// this change: testing-mode consent must be granted again.
+const SCOPES: &str = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/gmail.send";
 
 /// (client_id, client_secret, auth_uri, token_uri) from the Desktop client
 /// JSON at GOOGLE_CREDENTIALS_PATH. Read as generic JSON — no typed models.
@@ -156,6 +160,73 @@ async fn fetch_day(tok: &str, day_start: chrono::DateTime<chrono::Local>) -> Res
         .append_pair("singleEvents", "true")
         .append_pair("maxResults", "50");
     get_json(url, tok).await
+}
+
+/// Phase 2.0 payload-first capture for the WRITE path: send ONE real email
+/// to yourself and save the raw send response (plus a follow-up GET of the
+/// sent message, which shows what Gmail adds server-side: Message-ID, Date,
+/// threading). Run BEFORE modeling any send-response struct.
+pub async fn capture_gmail_send() -> Result<()> {
+    let tok = access_token().await?;
+
+    // Own address via the profile endpoint (covered by gmail.readonly).
+    let profile = get_json(
+        url::Url::parse("https://gmail.googleapis.com/gmail/v1/users/me/profile")?,
+        &tok,
+    )
+    .await?;
+    let me: Value = serde_json::from_str(&profile)?;
+    let me = me
+        .get("emailAddress")
+        .and_then(Value::as_str)
+        .context("profile response missing emailAddress")?
+        .to_string();
+
+    // Minimal deterministic MIME, addressed to yourself.
+    let mime = format!(
+        "To: {me}\r\nSubject: Almanac Phase 2.0 payload capture\r\nMIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: 8bit\r\n\r\n\
+         This message was sent by Almanac's payload-first capture path to fixture the\r\n\
+         users.messages.send response. It is expected exactly once per capture run."
+    );
+    let body = serde_json::json!({
+        "raw": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mime.as_bytes()),
+    });
+    let resp = reqwest::Client::new()
+        .post("https://gmail.googleapis.com/gmail/v1/users/me/messages/send")
+        .bearer_auth(&tok)
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&body)?)
+        .send()
+        .await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        // 403 here means the token predates the gmail.send scope.
+        bail!(
+            "users.messages.send failed ({status}): {text}\n\
+             (if 403/insufficient scopes: re-run `fixture-capture google-auth` — the \
+             gmail.send scope was added and needs fresh consent)"
+        );
+    }
+    let sent = crate::store::save_fixture("gmail_send", "send_response.json", &text)?;
+
+    // What did Gmail add? Fetch the sent message back (readonly scope).
+    let sent_id = sent
+        .get("id")
+        .and_then(Value::as_str)
+        .context("send response missing id — cannot fetch the sent message")?;
+    let full = get_json(
+        url::Url::parse(&format!(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/{sent_id}?format=full"
+        ))?,
+        &tok,
+    )
+    .await?;
+    crate::store::save_fixture("gmail_send", "sent_message_get.json", &full)?;
+
+    println!("gmail_send: captured send_response + sent_message_get (id {sent_id})");
+    Ok(())
 }
 
 pub async fn capture_gcal() -> Result<()> {

@@ -157,6 +157,171 @@ async fn run_live_briefing() -> Result<BriefingView, String> {
     result?
 }
 
+// ------------------------------------------- action layer (Phase 2.0) ------
+//
+// IPC discipline unchanged: string-field DTOs only. The `dryRun` string shown
+// in the queue IS the exact payload the executor will send (Gmail: the full
+// MIME; Slack: the exact JSON body) — no raw third-party content crosses here.
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceView {
+    pub tier: String,
+    pub kind: String,
+    pub source: String,
+    pub native_id: String,
+    /// The artifact's stored deep link (from the E2-enforcing INNER JOIN).
+    pub deep_link: String,
+    pub observed_at: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposalView {
+    pub id: i64,
+    pub kind: String,
+    pub state: String,
+    pub subject: Option<String>,
+    pub body: String,
+    pub asserts_work_done: bool,
+    pub backend_id: String,
+    pub created_at: String,
+    pub expires_at: String,
+    /// Exact bytes-to-be-sent, rendered for human approval.
+    pub dry_run: String,
+    pub receipt: Option<String>,
+    pub evidence: Vec<EvidenceView>,
+}
+
+fn proposal_to_view(
+    conn: &almanac_core::db::Connection,
+    p: almanac_core::act::StoredProposal,
+) -> ProposalView {
+    use almanac_core::act::executors::{render_gmail_reply, render_slack_post};
+    use almanac_core::act::ActionKind;
+    // dry_run is the exact send payload; if it can't render (e.g. target row
+    // missing) show the reason rather than a misleading blank.
+    let dry_run = match p.kind {
+        ActionKind::GmailReply => render_gmail_reply(conn, &p),
+        ActionKind::SlackPost => render_slack_post(&p),
+    }
+    .map(|r| r.display)
+    .unwrap_or_else(|e| format!("[dry-run unavailable: {e:#}]"));
+
+    ProposalView {
+        id: p.id,
+        kind: p.kind.as_str().to_string(),
+        state: p.state.as_str().to_string(),
+        subject: p.draft_subject,
+        body: p.draft_body,
+        asserts_work_done: p.asserts_work_done,
+        backend_id: p.backend_id,
+        created_at: p.created_at,
+        expires_at: p.expires_at,
+        dry_run,
+        receipt: p.receipt_json,
+        evidence: p
+            .evidence
+            .into_iter()
+            .map(|e| EvidenceView {
+                tier: e.tier.as_str().to_string(),
+                kind: e.kind.as_str().to_string(),
+                source: e.source.to_string(),
+                native_id: e.native_id,
+                deep_link: e.deep_link.unwrap_or(e.artifact_deep_link),
+                observed_at: e.observed_at,
+            })
+            .collect(),
+    }
+}
+
+/// The approval queue (TTL-swept), newest first.
+#[tauri::command]
+fn list_proposals() -> Result<Vec<ProposalView>, String> {
+    let inner = || -> anyhow::Result<Vec<ProposalView>> {
+        let path = almanac_core::init_default_db()?;
+        let mut conn = almanac_core::db::open(&path)?;
+        let proposals = almanac_core::act::list_proposals(&mut conn)?;
+        Ok(proposals.into_iter().map(|p| proposal_to_view(&conn, p)).collect())
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
+/// THE user-approval event (A1). Returns the new state after approval.
+#[tauri::command]
+fn approve_proposal(id: i64) -> Result<String, String> {
+    let inner = || -> anyhow::Result<String> {
+        let path = almanac_core::init_default_db()?;
+        let mut conn = almanac_core::db::open(&path)?;
+        // "user" names the human at the approval UI — the only actor that can
+        // move a proposal to Approved (A1).
+        almanac_core::act::approve(&mut conn, id, "user")?;
+        Ok("approved".to_string())
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn reject_proposal(id: i64) -> Result<String, String> {
+    let inner = || -> anyhow::Result<String> {
+        let path = almanac_core::init_default_db()?;
+        let mut conn = almanac_core::db::open(&path)?;
+        almanac_core::act::reject(&mut conn, id, "user")?;
+        Ok("rejected".to_string())
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
+/// Execute an APPROVED proposal (A2: dispatches to the executor that holds the
+/// write scope). Long-running (network); runs on the blocking pool.
+#[tauri::command]
+async fn execute_proposal(id: i64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::block_on(async move {
+            use almanac_core::act::executors::{
+                ActionExecutor, GmailReplyExecutor, SlackPostExecutor,
+            };
+            use almanac_core::act::ActionKind;
+            let path = almanac_core::init_default_db().map_err(|e| format!("{e:#}"))?;
+            let mut conn = almanac_core::db::open(&path).map_err(|e| format!("{e:#}"))?;
+            // Read the kind to pick the executor; the executor re-validates
+            // state == Approved itself (A1/A2 defense in depth).
+            let proposal =
+                almanac_core::act::load_proposal(&conn, id).map_err(|e| format!("{e:#}"))?;
+            let receipt = match proposal.kind {
+                ActionKind::GmailReply => {
+                    let ex = GmailReplyExecutor::from_env().map_err(|e| format!("{e:#}"))?;
+                    ex.execute(&mut conn, id).await
+                }
+                ActionKind::SlackPost => {
+                    let ex = SlackPostExecutor::from_env().map_err(|e| format!("{e:#}"))?;
+                    ex.execute(&mut conn, id).await
+                }
+            }
+            .map_err(|e| format!("{e:#}"))?;
+            Ok(format!(
+                "executed (http {}, audit seq {}..{})",
+                receipt.http_status, receipt.started_seq, receipt.final_seq
+            ))
+        })
+    })
+    .await
+    .map_err(|e| format!("execute task panicked: {e}"))?
+}
+
+/// Audit-chain verification for the UI footer (never fails the app; returns a
+/// human string either way).
+#[tauri::command]
+fn verify_audit_chain() -> Result<String, String> {
+    let inner = || -> anyhow::Result<String> {
+        let path = almanac_core::init_default_db()?;
+        let conn = almanac_core::db::open(&path)?;
+        let r = almanac_core::act::audit::verify_chain(&conn)?;
+        Ok(format!("audit chain intact — {} records (head seq {})", r.records, r.head_seq))
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // .env lives at the repo root; tauri dev runs with cwd=src-tauri and a
@@ -193,7 +358,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_briefing,
             get_connection_status,
-            run_live_briefing
+            run_live_briefing,
+            list_proposals,
+            approve_proposal,
+            reject_proposal,
+            execute_proposal,
+            verify_audit_chain
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

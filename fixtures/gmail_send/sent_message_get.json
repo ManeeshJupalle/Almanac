@@ -1,0 +1,64 @@
+{
+  "id": "19f58d74d1bca1f2",
+  "threadId": "19f58d74d1bca1f2",
+  "labelIds": [
+    "UNREAD",
+    "SENT",
+    "INBOX"
+  ],
+  "snippet": "[redacted]",
+  "payload": {
+    "partId": "",
+    "mimeType": "text/plain",
+    "filename": "",
+    "headers": [
+      {
+        "name": "Received",
+        "value": "[redacted]"
+      },
+      {
+        "name": "Received",
+        "value": "[redacted]"
+      },
+      {
+        "name": "To",
+        "value": "Redacted Sender <redacted@example.com>"
+      },
+      {
+        "name": "Subject",
+        "value": "[redacted subject]"
+      },
+      {
+        "name": "MIME-Version",
+        "value": "1.0"
+      },
+      {
+        "name": "Content-Type",
+        "value": "text/plain; charset=\"utf-8\""
+      },
+      {
+        "name": "Content-Transfer-Encoding",
+        "value": "8bit"
+      },
+      {
+        "name": "Date",
+        "value": "Sun, 12 Jul 2026 17:18:52 -0700"
+      },
+      {
+        "name": "Message-Id",
+        "value": "<redacted@example.com>"
+      },
+      {
+        "name": "From",
+        "value": "Redacted Sender <redacted@example.com>"
+      }
+    ],
+    "body": {
+      "size": 152,
+      "data": "W3JlZGFjdGVkXQ"
+    }
+  },
+  "sizeEstimate": 734,
+  "historyId": "12087483",
+  "internalDate": "1783901932000"
+}

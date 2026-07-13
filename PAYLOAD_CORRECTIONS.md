@@ -95,3 +95,64 @@ Reminder: Slack errors are **HTTP 200 + `"ok": false`** — status codes are use
   been saved on the app config (`http://localhost:8080/callback`); after
   registering it, user-token flow granted `channels:read,channels:history`
   (note: response reports them in reversed order — treat scope list as a set).
+
+---
+
+# Write-API corrections (Phase 2.0)
+
+Every place the **real captured write-path payloads** (2026-07-12, see
+`/fixtures/gmail_send` and `/fixtures/slack_post`) differ from what the docs
+imply. Captured by sending ONE real email to self and posting ONE real message
+to a private test channel (payload-first: these fixtures existed before any
+send/post response was interpreted). New scopes exercised: Google `gmail.send`
+(re-consent), Slack `chat:write` user scope (app config + reinstall).
+
+## Gmail `users.messages.send`
+
+Fixtures: `fixtures/gmail_send/send_response.json` (the send response),
+`fixtures/gmail_send/sent_message_get.json` (a follow-up `messages.get?format=full`
+of the sent id, showing what Gmail fills in server-side).
+
+| # | Field / area | Docs imply | Real payload | Consequence for the executor |
+|---|---|---|---|---|
+| GS1 | send response body | Returns a `Message` resource | **Partial** `Message`: only `{id, threadId, labelIds}` — no `payload`, `snippet`, `internalDate`, `sizeEstimate` | Never read headers/body from the send response; GET the id separately if you need them (as the capture does) |
+| GS2 | `threadId` vs `id` | Independent identifiers | On a NEW thread they are **equal** (`19f58d74d1bca1f2` == `19f58d74d1bca1f2`) | id==threadId only when starting a thread; a real reply threads to the *original's* threadId, so they differ — don't infer "reply" from equality |
+| GS3 | `labelIds` on a sent message | `SENT` | Message sent to **yourself** carries `["UNREAD","SENT","INBOX"]` at once | A self-addressed send is simultaneously SENT and delivered to INBOX+UNREAD; don't assume a lone `SENT` |
+| GS4 | `Message-Id` header | Caller may set it | **Server-assigned**: absent from what we sent, present on the GET (`<…@…>`) | Correct to OMIT `Message-ID` in the outbound MIME and let Gmail mint it (the executor does; the GET proves it) |
+| GS5 | `Date` header | Caller may set it | **Server-assigned** (`Sun, 12 Jul 2026 17:18:52 -0700`) — not in our MIME | Omitting `Date` is correct and required for a deterministic dry-run (the byte-identity test depends on it) |
+| GS6 | `From` header | Caller may set it | **Server-assigned** to the account address | Omitting `From` is correct; Gmail fills the authenticated identity |
+| GS7 | round-trip of a single-part reply | multipart shapes (per G6) | Our single `text/plain` MIME returns as a **flat** `payload` (no `parts[]`; `body.data` present directly) | Confirms the flat text/plain reply is well-formed; `body.data` is base64url, no padding (`W3JlZGFjdGVkXQ`, decodes to `[redacted]`) — consistent with G9 |
+| GS8 | per-message size field | (list uses `resultSizeEstimate`, G3) | GET carries `sizeEstimate` (camelCase, `734`) — a distinct per-message field | Don't confuse with the mailbox-wide `resultSizeEstimate` (G3); different key, different meaning |
+| GS9 | `internalDate` on the sent message | — | JSON **string** of epoch **ms** (`"1783901932000"`) | Same shape as G4; parse string→i64→ms |
+
+## Slack `chat.postMessage`
+
+Fixture: `fixtures/slack_post/post_response.json`.
+Reminder: errors are still **HTTP 200 + `"ok": false`** (as elsewhere in Slack).
+
+| # | Field / area | Docs imply | Real payload | Consequence |
+|---|---|---|---|---|
+| SP1 | echoed `message` identity | A user message (we posted with a **user** token, `chat:write`) | Echoed message carries `bot_id`, `app_id`, and a full `bot_profile` — it is **app-attributed**, not a bare user message | Our own posts are identifiable as app-posted; a re-ingest path must not treat them as human messages (relevant to future dedup / not replying to ourselves) |
+| SP2 | `ts` location | one value | Present **both** top-level (`"1783901949.342459"`) and nested in `message.ts`, identical | Use the top-level `ts` as the post's id / deep-link anchor (the per-channel unique id, S7 pattern) |
+| SP3 | plain-text post round-trip | `text` echoes back | Slack **auto-generates** a `blocks[]` (`rich_text` → `rich_text_section` → `text`) from our plain `text` | The echoed message has richer structure than what we sent; `message.text` is not the only representation |
+| SP4 | server-assigned `block_id` | — | The auto-generated block carries a `block_id` (`"Fn1Y9"`) we never sent | Echoed blocks get server-assigned ids; don't expect to control or match them |
+| SP5 | `bot_profile.updated` unit | (channel `updated` = ms, per S3) | Here `updated` = epoch **seconds** (`1783747526`, 10 digits) | Extends S3: the SAME field name `updated` is ms on a channel but seconds on a bot_profile — the unit is per-object, verify each; never guess |
+| SP6 | response envelope | `response_metadata`/warnings shown in examples | Simple `ok:true` post has **no** `response_metadata` and no `warning` | Absent metadata is the norm on a clean post (mirrors S2: metadata is not always present) |
+
+## Redaction notes (write-path fixtures)
+
+- Same structure-preserving rules as the read path (redactor routes by source
+  prefix, so `gmail_send`/`slack_post` reuse the `gmail`/`slack` rules). The
+  Gmail body `data` still decodes to base64url of `[redacted]`; the Slack
+  `message.text` and `bot_profile.name` are blanked; ids, `ts`, `app_id`,
+  `team`, `block_id`, and timestamps are kept verbatim (they are the deliverable
+  formats above). `bot_profile.icons` point at `a.slack-edge.com` (not
+  `files.slack.com`), so they are left as-is — public asset URLs, no PII.
+
+## Scope / permission notes (write path)
+
+- Google: `gmail.send` required fresh testing-mode consent (re-run of
+  `google-auth`); no other surprises — the same Desktop client covers it.
+- Slack: `chat:write` had to be added under **User Token Scopes**, the app
+  **reinstalled**, then `slack-auth` re-run. The post is attributed to the app
+  identity (`app_id`/`bot_id`) despite using the user token — see SP1.
