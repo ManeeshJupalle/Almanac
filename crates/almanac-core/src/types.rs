@@ -14,6 +14,9 @@ pub enum SourceId {
     Gmail,
     GoogleCalendar,
     Slack,
+    Jira,
+    /// Local git commits (Phase 2.2 GitWatcher) — Tier-Hard evidence, no network.
+    Git,
 }
 
 impl SourceId {
@@ -22,6 +25,8 @@ impl SourceId {
             "gmail" => SourceId::Gmail,
             "gcal" => SourceId::GoogleCalendar,
             "slack" => SourceId::Slack,
+            "jira" => SourceId::Jira,
+            "git" => SourceId::Git,
             _ => return None,
         })
     }
@@ -33,6 +38,8 @@ impl std::fmt::Display for SourceId {
             SourceId::Gmail => "gmail",
             SourceId::GoogleCalendar => "gcal",
             SourceId::Slack => "slack",
+            SourceId::Jira => "jira",
+            SourceId::Git => "git",
         })
     }
 }

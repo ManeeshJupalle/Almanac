@@ -21,9 +21,9 @@ use base64::Engine as _;
 use rusqlite::Connection;
 use serde_json::Value;
 
-use super::draft::{reply_subject, sanitize_header_value};
+use super::draft::{reply_subject, sanitize_header_value, text_to_adf};
 use super::{audit, ActionKind, ActionTarget, ProposalState, StoredProposal};
-use crate::auth::{GoogleAuth, SlackAuth};
+use crate::auth::{GoogleAuth, JiraAuth, SlackAuth};
 
 /// The exact action as it will hit the wire. `api_body` is byte-identical to
 /// what `execute()` sends; `display` is what the approval UI must show
@@ -31,7 +31,8 @@ use crate::auth::{GoogleAuth, SlackAuth};
 /// the same bytes as `api_body`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedAction {
-    pub endpoint: &'static str,
+    /// String (not &'static): Jira endpoints embed the issue key.
+    pub endpoint: String,
     pub content_type: &'static str,
     pub api_body: Vec<u8>,
     pub display: String,
@@ -41,7 +42,7 @@ pub struct RenderedAction {
 #[derive(Debug)]
 pub struct ExecutionReceipt {
     pub proposal_id: i64,
-    pub endpoint: &'static str,
+    pub endpoint: String,
     pub http_status: u16,
     /// Full response body (send/post metadata about OUR message — not
     /// third-party raw content).
@@ -85,12 +86,14 @@ fn load_approved(
     Ok(proposal)
 }
 
-/// Shared post-render pipeline: claim+audit, send, finalize+audit.
+/// Shared post-render pipeline: claim+audit, send, finalize+audit. `auth_header`
+/// is the full `Authorization` value ("Bearer …" for Google/Slack, "Basic …"
+/// for Jira) — never logged.
 async fn send_gated(
     conn: &mut Connection,
     proposal_id: i64,
     rendered: &RenderedAction,
-    bearer_token: &str,
+    auth_header: &str,
     success: impl Fn(u16, &str) -> Result<(), String>,
 ) -> Result<ExecutionReceipt> {
     // L1: audited (with the hash of the exact bytes) BEFORE the side effect.
@@ -98,9 +101,9 @@ async fn send_gated(
         super::claim_execution(conn, proposal_id, &audit::sha256_hex(&rendered.api_body))?;
 
     let sent = reqwest::Client::new()
-        .post(rendered.endpoint)
+        .post(&rendered.endpoint)
         .header(reqwest::header::CONTENT_TYPE, rendered.content_type)
-        .bearer_auth(bearer_token)
+        .header(reqwest::header::AUTHORIZATION, auth_header)
         .body(rendered.api_body.clone())
         .send()
         .await;
@@ -115,7 +118,7 @@ async fn send_gated(
                         super::finalize_execution(conn, proposal_id, Some(body.trim()), None)?;
                     Ok(ExecutionReceipt {
                         proposal_id,
-                        endpoint: rendered.endpoint,
+                        endpoint: rendered.endpoint.clone(),
                         http_status: status,
                         response_body: body.trim().to_string(),
                         started_seq,
@@ -228,7 +231,7 @@ pub fn render_gmail_reply(conn: &Connection, proposal: &StoredProposal) -> Resul
     }))?;
 
     Ok(RenderedAction {
-        endpoint: GMAIL_SEND_ENDPOINT,
+        endpoint: GMAIL_SEND_ENDPOINT.to_string(),
         content_type: "application/json",
         api_body,
         display: mime,
@@ -252,7 +255,7 @@ impl ActionExecutor for GmailReplyExecutor {
         // Token AFTER the gate, BEFORE the claim: a token failure must not
         // leave a claimed-but-unsent proposal.
         let token = self.auth.access_token().await?;
-        send_gated(conn, proposal_id, &rendered, &token, |status, _| {
+        send_gated(conn, proposal_id, &rendered, &format!("Bearer {token}"), |status, _| {
             if (200..300).contains(&status) {
                 Ok(())
             } else if status == 403 {
@@ -297,7 +300,7 @@ pub fn render_slack_post(proposal: &StoredProposal) -> Result<RenderedAction> {
     }))?;
     let display = String::from_utf8(api_body.clone()).expect("json is utf-8");
     Ok(RenderedAction {
-        endpoint: SLACK_POST_ENDPOINT,
+        endpoint: SLACK_POST_ENDPOINT.to_string(),
         content_type: "application/json; charset=utf-8",
         api_body,
         display,
@@ -318,7 +321,7 @@ impl ActionExecutor for SlackPostExecutor {
         let proposal = load_approved(conn, proposal_id, ActionKind::SlackPost)?;
         let rendered = render_slack_post(&proposal)?;
         let token = self.auth.user_token()?;
-        send_gated(conn, proposal_id, &rendered, &token, |status, body| {
+        send_gated(conn, proposal_id, &rendered, &format!("Bearer {token}"), |status, body| {
             // Slack signals errors as HTTP 200 + ok=false (S-corrections).
             let ok = serde_json::from_str::<Value>(body)
                 .ok()
@@ -341,6 +344,184 @@ impl ActionExecutor for SlackPostExecutor {
                 } else {
                     Err(err)
                 }
+            }
+        })
+        .await
+    }
+}
+
+// -------------------------------------------------------------- Jira ------
+//
+// A2: the Jira executors hold the ONLY Jira write path and read only the
+// JIRA_* Basic-auth credential — never Gmail/Slack tokens. Both re-validate
+// state == approved (A1) and send `dry_run`'s exact bytes (byte-identity).
+
+/// Wrap the issue key into the transitions endpoint.
+fn transitions_endpoint(base: &str, key: &str) -> String {
+    format!("{}/rest/api/3/issue/{key}/transitions", base.trim_end_matches('/'))
+}
+fn comment_endpoint(base: &str, key: &str) -> String {
+    format!("{}/rest/api/3/issue/{key}/comment", base.trim_end_matches('/'))
+}
+
+/// Transition a Jira issue. Requires the token's account to have the transition
+/// permission on the issue. Holds the ONLY Jira transition write path (A2).
+pub struct JiraTransitionExecutor {
+    auth: JiraAuth,
+}
+
+impl JiraTransitionExecutor {
+    pub fn new(auth: JiraAuth) -> Self {
+        Self { auth }
+    }
+    pub fn from_env() -> Result<Self> {
+        Ok(Self::new(JiraAuth::from_env()?))
+    }
+
+    /// Live set of transition ids currently offered for `issue_key` (J6
+    /// re-validation). A read GET — no write.
+    async fn available_transition_ids(&self, issue_key: &str) -> Result<Vec<String>> {
+        Ok(crate::adapters::jira::fetch_transitions(&self.auth, issue_key)
+            .await?
+            .into_iter()
+            .map(|t| t.id)
+            .collect())
+    }
+}
+
+/// Pure render: the exact `{"transition":{"id":…}}` POST body. `display` names
+/// the human effect (J7: the response is 204 empty, so the body IS the action).
+pub fn render_jira_transition(
+    base_url: &str,
+    proposal: &StoredProposal,
+) -> Result<RenderedAction> {
+    let ActionTarget::JiraTransition { issue_key, transition_id, transition_name } =
+        &proposal.target
+    else {
+        bail!("proposal {} is not a jira transition", proposal.id);
+    };
+    let api_body = serde_json::to_vec(&serde_json::json!({
+        "transition": { "id": transition_id }
+    }))?;
+    let display = format!(
+        "POST {}\nTransition {issue_key} via transition {transition_id} (\u{201c}{transition_name}\u{201d})\n{}",
+        transitions_endpoint(base_url, issue_key),
+        String::from_utf8(api_body.clone()).expect("json is utf-8"),
+    );
+    Ok(RenderedAction {
+        endpoint: transitions_endpoint(base_url, issue_key),
+        content_type: "application/json",
+        api_body,
+        display,
+    })
+}
+
+#[async_trait]
+impl ActionExecutor for JiraTransitionExecutor {
+    fn action_kind(&self) -> ActionKind {
+        ActionKind::JiraTransition
+    }
+
+    fn dry_run(&self, _conn: &Connection, proposal: &StoredProposal) -> Result<RenderedAction> {
+        render_jira_transition(self.auth.base_url(), proposal)
+    }
+
+    async fn execute(&self, conn: &mut Connection, proposal_id: i64) -> Result<ExecutionReceipt> {
+        let proposal = load_approved(conn, proposal_id, ActionKind::JiraTransition)?;
+        let ActionTarget::JiraTransition { issue_key, transition_id, .. } = &proposal.target else {
+            bail!("proposal {proposal_id} is not a jira transition");
+        };
+        let rendered = render_jira_transition(self.auth.base_url(), &proposal)?;
+
+        // J6 HAZARD: available transitions can change between propose and
+        // approve (another actor moved the issue, workflow edited). Re-validate
+        // LIVE before the write. If the stored transition id is no longer
+        // offered, FAIL SAFELY — audit execution_failed, apply nothing. This
+        // read happens after the A1 gate and before the L1 claim, so a stale
+        // transition never becomes a claimed-but-wrong write.
+        let available = self.available_transition_ids(issue_key).await?;
+        if !available.contains(transition_id) {
+            let msg = format!(
+                "transition {transition_id} is no longer valid for {issue_key} \
+                 (offered now: [{}]) — the issue moved since this was proposed; \
+                 applying nothing",
+                available.join(", ")
+            );
+            let seq = super::finalize_execution(conn, proposal_id, None, Some(&msg))?;
+            bail!("{msg} (audited as execution_failed, seq {seq})");
+        }
+
+        let header = self.auth.basic_auth_header()?;
+        send_gated(conn, proposal_id, &rendered, &header, |status, body| {
+            // J7: success is 204 No Content (empty body).
+            if (200..300).contains(&status) {
+                Ok(())
+            } else {
+                Err(crate::adapters::jira::jira_error(body))
+            }
+        })
+        .await
+    }
+}
+
+/// Comment on a Jira issue. Holds the ONLY Jira comment write path (A2).
+pub struct JiraCommentExecutor {
+    auth: JiraAuth,
+}
+
+impl JiraCommentExecutor {
+    pub fn new(auth: JiraAuth) -> Self {
+        Self { auth }
+    }
+    pub fn from_env() -> Result<Self> {
+        Ok(Self::new(JiraAuth::from_env()?))
+    }
+}
+
+/// Pure render: the draft text wrapped into the exact ADF `{"body":…}` POST
+/// body (J3: v3 requires ADF; a plain string is rejected 400).
+pub fn render_jira_comment(base_url: &str, proposal: &StoredProposal) -> Result<RenderedAction> {
+    let ActionTarget::JiraComment { issue_key } = &proposal.target else {
+        bail!("proposal {} is not a jira comment", proposal.id);
+    };
+    let api_body = serde_json::to_vec(&serde_json::json!({
+        "body": text_to_adf(&proposal.draft_body)
+    }))?;
+    let display = format!(
+        "POST {}\n{}",
+        comment_endpoint(base_url, issue_key),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "body": text_to_adf(&proposal.draft_body)
+        }))
+        .unwrap_or_default(),
+    );
+    Ok(RenderedAction {
+        endpoint: comment_endpoint(base_url, issue_key),
+        content_type: "application/json",
+        api_body,
+        display,
+    })
+}
+
+#[async_trait]
+impl ActionExecutor for JiraCommentExecutor {
+    fn action_kind(&self) -> ActionKind {
+        ActionKind::JiraComment
+    }
+
+    fn dry_run(&self, _conn: &Connection, proposal: &StoredProposal) -> Result<RenderedAction> {
+        render_jira_comment(self.auth.base_url(), proposal)
+    }
+
+    async fn execute(&self, conn: &mut Connection, proposal_id: i64) -> Result<ExecutionReceipt> {
+        let proposal = load_approved(conn, proposal_id, ActionKind::JiraComment)?;
+        let rendered = render_jira_comment(self.auth.base_url(), &proposal)?;
+        let header = self.auth.basic_auth_header()?;
+        send_gated(conn, proposal_id, &rendered, &header, |status, body| {
+            if (200..300).contains(&status) {
+                Ok(())
+            } else {
+                Err(crate::adapters::jira::jira_error(body))
             }
         })
         .await

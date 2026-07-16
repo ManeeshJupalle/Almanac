@@ -190,6 +190,8 @@ pub struct ProposalView {
     /// Exact bytes-to-be-sent, rendered for human approval.
     pub dry_run: String,
     pub receipt: Option<String>,
+    /// Templated correlation basis + confidence (Phase 2.2), if any.
+    pub correlation_rationale: Option<String>,
     pub evidence: Vec<EvidenceView>,
 }
 
@@ -197,13 +199,19 @@ fn proposal_to_view(
     conn: &almanac_core::db::Connection,
     p: almanac_core::act::StoredProposal,
 ) -> ProposalView {
-    use almanac_core::act::executors::{render_gmail_reply, render_slack_post};
+    use almanac_core::act::executors::{
+        render_gmail_reply, render_jira_comment, render_jira_transition, render_slack_post,
+    };
     use almanac_core::act::ActionKind;
     // dry_run is the exact send payload; if it can't render (e.g. target row
-    // missing) show the reason rather than a misleading blank.
+    // missing) show the reason rather than a misleading blank. Jira renders
+    // need the site base URL (from JiraAuth config, no token access here).
+    let jira_base = || almanac_core::auth::JiraAuth::from_env().map(|a| a.base_url().to_string());
     let dry_run = match p.kind {
         ActionKind::GmailReply => render_gmail_reply(conn, &p),
         ActionKind::SlackPost => render_slack_post(&p),
+        ActionKind::JiraTransition => jira_base().and_then(|b| render_jira_transition(&b, &p)),
+        ActionKind::JiraComment => jira_base().and_then(|b| render_jira_comment(&b, &p)),
     }
     .map(|r| r.display)
     .unwrap_or_else(|e| format!("[dry-run unavailable: {e:#}]"));
@@ -220,6 +228,7 @@ fn proposal_to_view(
         expires_at: p.expires_at,
         dry_run,
         receipt: p.receipt_json,
+        correlation_rationale: p.correlation_rationale,
         evidence: p
             .evidence
             .into_iter()
@@ -279,7 +288,8 @@ async fn execute_proposal(id: i64) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
             use almanac_core::act::executors::{
-                ActionExecutor, GmailReplyExecutor, SlackPostExecutor,
+                ActionExecutor, GmailReplyExecutor, JiraCommentExecutor, JiraTransitionExecutor,
+                SlackPostExecutor,
             };
             use almanac_core::act::ActionKind;
             let path = almanac_core::init_default_db().map_err(|e| format!("{e:#}"))?;
@@ -295,6 +305,14 @@ async fn execute_proposal(id: i64) -> Result<String, String> {
                 }
                 ActionKind::SlackPost => {
                     let ex = SlackPostExecutor::from_env().map_err(|e| format!("{e:#}"))?;
+                    ex.execute(&mut conn, id).await
+                }
+                ActionKind::JiraTransition => {
+                    let ex = JiraTransitionExecutor::from_env().map_err(|e| format!("{e:#}"))?;
+                    ex.execute(&mut conn, id).await
+                }
+                ActionKind::JiraComment => {
+                    let ex = JiraCommentExecutor::from_env().map_err(|e| format!("{e:#}"))?;
                     ex.execute(&mut conn, id).await
                 }
             }

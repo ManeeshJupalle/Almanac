@@ -56,6 +56,33 @@ pub enum DraftRequest {
     /// Fixed-text Slack check-in post — makes no claim about work done.
     /// (Used by the Phase 2.0 live gate and the dev seed path.)
     SlackCheckInPost,
+    /// Jira comment asserting completed work — E1: requires Tier-Hard evidence.
+    JiraWorkDoneComment {
+        ticket: String,
+        commit_short: String,
+        completed_at: DateTime<Utc>,
+        ci_link: Option<String>,
+    },
+    /// Jira acknowledgement comment — makes no claim about work done.
+    /// (Phase 2.1 dev seed uses this: no git evidence exists until Phase 2.2.)
+    JiraAckComment,
+    /// A note describing a proposed status transition (no factual work claim;
+    /// the real action is the transition POST, not this prose).
+    JiraTransitionNote { issue_key: String, transition_name: String },
+}
+
+/// Wrap plain text into a minimal ADF document (J3: Jira v3 requires ADF for
+/// comment bodies). `serde_json` preserves key order, so the bytes are
+/// deterministic — the executor's dry-run and execute produce identical ADF.
+pub fn text_to_adf(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "doc",
+        "version": 1,
+        "content": [{
+            "type": "paragraph",
+            "content": [{ "type": "text", "text": text }]
+        }]
+    })
 }
 
 /// Same shape as `SynthesisBackend`: swappable so a model backend can be
@@ -181,6 +208,34 @@ impl DraftingBackend for TemplatedDraftingBackend {
                 body: "Almanac action-layer live check — this post was proposed, shown \
                        verbatim in a dry-run, and explicitly approved before sending."
                     .to_string(),
+                asserts_work_done: false,
+            }),
+            DraftRequest::JiraWorkDoneComment { ticket, commit_short, completed_at, ci_link } => {
+                validate_ticket(ticket)?;
+                validate_commit_short(commit_short)?;
+                if let Some(l) = ci_link {
+                    validate_link(l)?;
+                }
+                let mut body = format!(
+                    "Done — {ticket} fixed in {commit_short} at {}.",
+                    format_time(*completed_at)
+                );
+                if let Some(l) = ci_link {
+                    body.push_str(&format!(" CI is green: {l}."));
+                }
+                // The executor wraps this text into ADF (J3); asserts work → E1.
+                Ok(Draft { subject: None, body, asserts_work_done: true })
+            }
+            DraftRequest::JiraAckComment => Ok(Draft {
+                subject: None,
+                body: "Acknowledged — Almanac is tracking this; an update will follow.".to_string(),
+                asserts_work_done: false,
+            }),
+            DraftRequest::JiraTransitionNote { issue_key, transition_name } => Ok(Draft {
+                subject: None,
+                // Prose is descriptive only; the real action is the transition
+                // POST. No factual work claim, so E1 does not gate it.
+                body: format!("Move {issue_key} to \u{201c}{transition_name}\u{201d}."),
                 asserts_work_done: false,
             }),
         }

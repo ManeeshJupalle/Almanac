@@ -40,7 +40,7 @@ type Evidence = {
 
 type Proposal = {
   id: number;
-  kind: "gmail_reply" | "slack_post";
+  kind: "gmail_reply" | "slack_post" | "jira_transition" | "jira_comment";
   state:
     | "proposed"
     | "approved"
@@ -56,12 +56,15 @@ type Proposal = {
   expiresAt: string;
   dryRun: string;
   receipt: string | null;
+  correlationRationale: string | null;
   evidence: Evidence[];
 };
 
 const PROPOSAL_KIND_LABEL: Record<Proposal["kind"], string> = {
   gmail_reply: "Gmail reply",
   slack_post: "Slack post",
+  jira_transition: "Jira transition",
+  jira_comment: "Jira comment",
 };
 
 const KIND_LABEL: Record<BriefingItem["kind"], string> = {
@@ -381,6 +384,15 @@ function App() {
                       </span>
                     )}
                   </div>
+
+                  {p.correlationRationale && (
+                    <p
+                      className="correlation-rationale"
+                      title="Why Almanac proposed this — the deterministic correlation basis and its confidence."
+                    >
+                      {p.correlationRationale}
+                    </p>
+                  )}
 
                   <div className="evidence" aria-label="Evidence chain">
                     {p.evidence.map((e, i) => (

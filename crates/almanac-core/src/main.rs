@@ -40,6 +40,15 @@ fn main() -> ExitCode {
         // stored source object. Correlation (Phase 2.2) is the production
         // proposer; nothing outside tests/dev calls this.
         Some("debug-seed-proposal") => seed_proposal(args.get(1).cloned(), args.get(2).cloned()),
+        // Phase 2.1: fetch Jira issues live and store them as source objects so
+        // a jira proposal can be seeded (its target/evidence must resolve, E2).
+        Some("fetch-jira") => block_on(fetch_jira()),
+        // Phase 2.2: local, network-free — read commits from configured repos
+        // and store them as Tier-Hard source objects for the correlator.
+        Some("git-watch") => git_watch(),
+        // Phase 2.2: correlate asks ↔ Jira issues ↔ commits and queue proposals
+        // for the Full (ask+item+commit) threads. Reads only; no external writes.
+        Some("correlate") => block_on(correlate_cmd()),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
             println!(
@@ -77,10 +86,15 @@ fn main() -> ExitCode {
                  \x20 refresh-google           forced Google token refresh (fingerprint evidence)\n\
                  \x20 refresh-slack            Slack token refresh / live validation\n\
                  \n\
-                 Action layer (Phase 2.0):\n\
+                 Action layer (Phase 2.0/2.1):\n\
                  \x20 verify-chain             walk + verify the hash-chained audit log\n\
                  \x20 list-proposals           approval queue + audit tail (local console)\n\
-                 \x20 debug-seed-proposal <gmail-ack|slack-check> [native_id]\n\
+                 \x20 fetch-jira               fetch + store recent Jira issues (source objects)\n\
+                 \n\
+                 Correlation (Phase 2.2):\n\
+                 \x20 git-watch                read local repos (ALMANAC_GIT_REPOS) -> commit evidence\n\
+                 \x20 correlate                bind asks<->issues<->commits, queue proposals (read-only)\n\
+                 \x20 debug-seed-proposal <gmail-ack|slack-check|jira-comment|jira-transition> [native_id]\n\
                  \x20                          DEV-ONLY: seed a test proposal from a stored\n\
                  \x20                          source object (correlation arrives in 2.2)\n\
                  \n\
@@ -103,6 +117,16 @@ fn main() -> ExitCode {
 
 fn block_on<F: std::future::Future<Output = Result<()>>>(fut: F) -> Result<()> {
     tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(fut)
+}
+
+/// Block on a future returning any value (for one-off async reads in an
+/// otherwise-sync command). Only called outside an existing runtime.
+fn block_on_val<T, F: std::future::Future<Output = T>>(fut: F) -> T {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime")
+        .block_on(fut)
 }
 
 fn self_check() -> Result<()> {
@@ -434,6 +458,149 @@ async fn extract_live() -> Result<()> {
     Ok(())
 }
 
+/// Phase 2.1 dev helper: fetch recent Jira issues via the adapter and store
+/// them as grounded source objects (+ extract), so a jira proposal's target
+/// and evidence resolve at rest (E2). Not the production proposer.
+async fn fetch_jira() -> Result<()> {
+    use almanac_core::adapters::{jira::JiraAdapter, SourceAdapter};
+    let window = TimeWindow { start: Utc::now() - Duration::days(30), end: Utc::now() };
+    let mut jira = JiraAdapter::from_env()?;
+    jira.authenticate().await?;
+    let objects = jira.fetch_window(window).await?;
+
+    let extractor = almanac_core::extract::Extractor::rules_only();
+    let items = extractor.extract(&objects)?;
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    for (obj, item) in objects.iter().zip(&items) {
+        almanac_core::db::insert_source_object(&conn, obj)?;
+        almanac_core::db::insert_extracted_item(&conn, item)?;
+    }
+    println!("fetched + stored {} Jira issue(s):", objects.len());
+    for (obj, item) in objects.iter().zip(&items) {
+        println!(
+            "  {} [{}] {} -> {}",
+            obj.provenance.native_id,
+            item.kind().as_str(),
+            item.summary(),
+            obj.provenance.deep_link
+        );
+    }
+    if jira.was_truncated() {
+        println!("(note: results truncated at the fetch cap)");
+    }
+    Ok(())
+}
+
+// ------------------------------------------------- correlation (2.2) ------
+
+/// Phase 2.2: read commits from the configured local repos and store them as
+/// Tier-Hard `source = git` source objects. Local + network-free (A2: no token
+/// is touched here). This is the GitWatcher live gate.
+fn git_watch() -> Result<()> {
+    use almanac_core::git::{self, GitWatcher};
+    let watcher = GitWatcher::from_env()?;
+    let since = Utc::now() - Duration::days(90);
+    let commits = watcher.collect(since)?;
+
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    for c in &commits {
+        almanac_core::db::insert_source_object(&conn, &git::to_source_object(c))?;
+    }
+    println!(
+        "git-watch: {} commit(s) from {} repo(s) stored as Tier-Hard source objects:",
+        commits.len(),
+        watcher.repos().len()
+    );
+    for c in &commits {
+        println!(
+            "  {} [{}] {} — [{}] ({}) -> {}",
+            c.short_sha,
+            if c.is_merge() { "merge" } else { "commit" },
+            c.subject,
+            c.branches.join(", "),
+            c.author_name,
+            c.deep_link,
+        );
+    }
+    Ok(())
+}
+
+/// Phase 2.2: correlate stored asks ↔ Jira issues ↔ commits and queue proposals
+/// for the Full threads (ask + item + ≥1 commit). READ-ONLY w.r.t. external
+/// services — the only writes are local queue rows a human still approves.
+async fn correlate_cmd() -> Result<()> {
+    use almanac_core::act::draft::TemplatedDraftingBackend;
+    use almanac_core::correlate::{self, CorrelationEngine};
+
+    let mut conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let asks = correlate::load_asks(&conn)?;
+    let items = correlate::load_work_items(&conn)?;
+    let commits = correlate::load_commits(&conn)?;
+    println!(
+        "correlate inputs: {} ask(s), {} work item(s), {} commit(s)",
+        asks.len(),
+        items.len(),
+        commits.len()
+    );
+
+    // J15: best-effort self accountId so our own Jira comments are excluded. A
+    // read GET; on failure (e.g. offline) we proceed without self-exclusion.
+    let self_id = match almanac_core::auth::JiraAuth::from_env() {
+        Ok(auth) => match almanac_core::adapters::jira::fetch_self_account_id(&auth).await {
+            Ok(id) => {
+                println!("self accountId resolved for J15 comment exclusion");
+                Some(id)
+            }
+            Err(e) => {
+                println!("note: could not resolve /myself ({}); J15 self-exclusion disabled", first_line(&e));
+                None
+            }
+        },
+        Err(_) => None,
+    };
+
+    let engine = CorrelationEngine::new(self_id);
+    let threads = engine.correlate(&asks, &items, &commits);
+    let backend = TemplatedDraftingBackend;
+
+    let mut queued = 0usize;
+    println!("\n{} work thread(s):", threads.len());
+    for t in &threads {
+        println!(
+            "  {} · confidence {} — {} ask(s), {} commit(s)",
+            t.item.key,
+            t.confidence.as_str(),
+            t.asks.len(),
+            t.evidence.len()
+        );
+        if t.is_full() {
+            for proposal in correlate::propose_from_thread(t, &backend)? {
+                let id = almanac_core::act::insert_proposal(
+                    &mut conn,
+                    &proposal,
+                    "correlation",
+                    Duration::hours(24),
+                )?;
+                queued += 1;
+                println!("     -> queued proposal #{id} ({})", proposal.kind().as_str());
+            }
+        } else {
+            println!("     (possible match — surfaced for your confirmation; no proposal queued)");
+        }
+    }
+    println!(
+        "\ncorrelate: {} proposal(s) queued from {} full thread(s). Approve them in the app.",
+        queued,
+        threads.iter().filter(|t| t.is_full()).count()
+    );
+    Ok(())
+}
+
+/// First line of an error chain (short console notes).
+fn first_line(err: &anyhow::Error) -> String {
+    format!("{err}").lines().next().unwrap_or("error").to_string()
+}
+
 // ------------------------------------------------ action layer (2.0) ------
 
 /// Walk and verify the hash-chained audit log. Any break fails loudly.
@@ -589,7 +756,77 @@ fn seed_proposal(which: Option<String>, native_id: Option<String>) -> Result<()>
             )?;
             ("slack check-in post", id)
         }
-        _ => anyhow::bail!("usage: debug-seed-proposal <gmail-ack|slack-check> [native_id]"),
+        Some("jira-comment") => {
+            let (native_id, deep_link, occurred_at) = pick(&conn, "jira", native_id.as_deref())?;
+            let draft = backend.draft(&DraftRequest::JiraAckComment)?;
+            let evidence = vec![EvidenceRef {
+                kind: EvidenceKind::JiraEvent,
+                source: SourceId::Jira,
+                native_id: native_id.clone(),
+                deep_link: Some(deep_link),
+                observed_at: chrono::DateTime::parse_from_rfc3339(&occurred_at)?
+                    .with_timezone(&chrono::Utc),
+            }];
+            let proposal = ActionProposal::new(
+                ActionKind::JiraComment,
+                ActionTarget::JiraComment { issue_key: native_id },
+                draft,
+                evidence,
+                backend.backend_id(),
+            )?;
+            let id = almanac_core::act::insert_proposal(
+                &mut conn,
+                &proposal,
+                "dev-seed",
+                chrono::Duration::hours(24),
+            )?;
+            ("jira comment", id)
+        }
+        Some("jira-transition") => {
+            let (native_id, deep_link, occurred_at) = pick(&conn, "jira", native_id.as_deref())?;
+            // Pick the first screen-less transition currently offered (live).
+            let auth = almanac_core::auth::JiraAuth::from_env()?;
+            let options = block_on_val(almanac_core::adapters::jira::fetch_transitions(
+                &auth, &native_id,
+            ))?;
+            let opt = options
+                .into_iter()
+                .find(|t| !t.has_screen)
+                .context("issue offers no screen-less transition to propose")?;
+            let draft = backend.draft(&DraftRequest::JiraTransitionNote {
+                issue_key: native_id.clone(),
+                transition_name: opt.to_name.clone(),
+            })?;
+            let evidence = vec![EvidenceRef {
+                kind: EvidenceKind::JiraEvent,
+                source: SourceId::Jira,
+                native_id: native_id.clone(),
+                deep_link: Some(deep_link),
+                observed_at: chrono::DateTime::parse_from_rfc3339(&occurred_at)?
+                    .with_timezone(&chrono::Utc),
+            }];
+            let proposal = ActionProposal::new(
+                ActionKind::JiraTransition,
+                ActionTarget::JiraTransition {
+                    issue_key: native_id,
+                    transition_id: opt.id,
+                    transition_name: opt.to_name,
+                },
+                draft,
+                evidence,
+                backend.backend_id(),
+            )?;
+            let id = almanac_core::act::insert_proposal(
+                &mut conn,
+                &proposal,
+                "dev-seed",
+                chrono::Duration::hours(24),
+            )?;
+            ("jira transition", id)
+        }
+        _ => anyhow::bail!(
+            "usage: debug-seed-proposal <gmail-ack|slack-check|jira-comment|jira-transition> [native_id]"
+        ),
     };
 
     let stored = almanac_core::act::load_proposal(&conn, id)?;
@@ -598,6 +835,14 @@ fn seed_proposal(which: Option<String>, native_id: Option<String>) -> Result<()>
             almanac_core::act::executors::render_gmail_reply(&conn, &stored)?
         }
         ActionKind::SlackPost => almanac_core::act::executors::render_slack_post(&stored)?,
+        ActionKind::JiraTransition => almanac_core::act::executors::render_jira_transition(
+            almanac_core::auth::JiraAuth::from_env()?.base_url(),
+            &stored,
+        )?,
+        ActionKind::JiraComment => almanac_core::act::executors::render_jira_comment(
+            almanac_core::auth::JiraAuth::from_env()?.base_url(),
+            &stored,
+        )?,
     };
     println!("seeded {kind_label} as proposal #{id} (state: proposed)");
     println!("dry-run ({} bytes to {}):", rendered.api_body.len(), rendered.endpoint);

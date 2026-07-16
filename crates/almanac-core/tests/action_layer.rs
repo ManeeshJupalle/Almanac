@@ -8,15 +8,17 @@ use std::path::{Path, PathBuf};
 
 use almanac_core::act::draft::{Draft, DraftingBackend, DraftRequest, TemplatedDraftingBackend};
 use almanac_core::act::executors::{
-    render_gmail_reply, render_slack_post, ActionExecutor, GmailReplyExecutor, SlackPostExecutor,
+    render_gmail_reply, render_jira_comment, render_jira_transition, render_slack_post,
+    ActionExecutor, GmailReplyExecutor, JiraCommentExecutor, JiraTransitionExecutor,
+    SlackPostExecutor,
 };
 use almanac_core::act::{
     audit, ActionKind, ActionProposal, ActionTarget, EvidenceKind, EvidenceRef, EvidenceTier,
     ProposalState, ProposalViolation,
 };
 use almanac_core::adapters::{gmail, slack};
-use almanac_core::auth::{GoogleAuth, SlackAuth};
-use almanac_core::types::{SourceId, SourceObject};
+use almanac_core::auth::{GoogleAuth, JiraAuth, SlackAuth};
+use almanac_core::types::{ProvenanceRef, RawContent, SourceId, SourceObject};
 use base64::Engine as _;
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -56,6 +58,7 @@ fn hard_evidence_for(obj: &SourceObject) -> EvidenceRef {
     EvidenceRef {
         kind: match obj.provenance.source {
             SourceId::GoogleCalendar => EvidenceKind::CalendarEvent,
+            SourceId::Jira => EvidenceKind::JiraEvent,
             _ => EvidenceKind::Message,
         },
         source: obj.provenance.source,
@@ -63,6 +66,30 @@ fn hard_evidence_for(obj: &SourceObject) -> EvidenceRef {
         deep_link: Some(obj.provenance.deep_link.clone()),
         observed_at: obj.occurred_at,
     }
+}
+
+const JIRA_BASE: &str = "https://x.atlassian.net";
+
+/// Store a minimal Jira issue as a source object (source = jira).
+fn store_jira_issue(conn: &Connection, key: &str) -> SourceObject {
+    let obj = SourceObject {
+        provenance: ProvenanceRef {
+            source: SourceId::Jira,
+            native_id: key.to_string(),
+            deep_link: format!("{JIRA_BASE}/browse/{key}"),
+        },
+        raw: RawContent::new(json!({
+            "key": key,
+            "fields": { "summary": "Fix bug", "status": { "statusCategory": { "key": "new" } } }
+        })),
+        occurred_at: chrono::Utc::now(),
+    };
+    almanac_core::db::insert_source_object(conn, &obj).unwrap();
+    obj
+}
+
+fn dummy_jira_auth() -> JiraAuth {
+    JiraAuth { base_url: JIRA_BASE.to_string(), token_path: "does-not-exist.json".into() }
 }
 
 fn soft_evidence() -> EvidenceRef {
@@ -712,4 +739,208 @@ fn header_injection_is_neutralized_end_to_end_in_the_mime() {
         !headers_part.lines().any(|l| l.starts_with("Bcc:")),
         "header injection survived sanitization:\n{headers_part}"
     );
+}
+
+// -------------------------------------------------------------- Jira (2.1) ----
+
+fn jira_comment_proposal(conn: &mut Connection, key: &str) -> i64 {
+    let issue = store_jira_issue(conn, key);
+    let draft = TemplatedDraftingBackend.draft(&DraftRequest::JiraAckComment).unwrap();
+    let p = ActionProposal::new(
+        ActionKind::JiraComment,
+        ActionTarget::JiraComment { issue_key: key.to_string() },
+        draft,
+        vec![hard_evidence_for(&issue)],
+        "templated-v1",
+    )
+    .unwrap();
+    almanac_core::act::insert_proposal(conn, &p, "test", chrono::Duration::hours(24)).unwrap()
+}
+
+fn jira_transition_proposal(conn: &mut Connection, key: &str, tid: &str) -> i64 {
+    let issue = store_jira_issue(conn, key);
+    let draft = TemplatedDraftingBackend
+        .draft(&DraftRequest::JiraTransitionNote {
+            issue_key: key.to_string(),
+            transition_name: "In Review".into(),
+        })
+        .unwrap();
+    let p = ActionProposal::new(
+        ActionKind::JiraTransition,
+        ActionTarget::JiraTransition {
+            issue_key: key.to_string(),
+            transition_id: tid.to_string(),
+            transition_name: "In Review".into(),
+        },
+        draft,
+        vec![hard_evidence_for(&issue)],
+        "templated-v1",
+    )
+    .unwrap();
+    almanac_core::act::insert_proposal(conn, &p, "test", chrono::Duration::hours(24)).unwrap()
+}
+
+#[test]
+fn jira_comment_dry_run_is_exact_adf_and_byte_identical() {
+    let (_d, mut conn) = test_db();
+    let id = jira_comment_proposal(&mut conn, "ALM-1");
+    let stored = almanac_core::act::load_proposal(&conn, id).unwrap();
+
+    let r1 = render_jira_comment(JIRA_BASE, &stored).unwrap();
+    let r2 = render_jira_comment(JIRA_BASE, &stored).unwrap();
+    assert_eq!(r1, r2, "render must be deterministic");
+    // The executor's dry_run calls the same render with the same base — the
+    // bytes it displays ARE the bytes execute() sends (byte identity).
+    let ex = JiraCommentExecutor::new(dummy_jira_auth());
+    assert_eq!(ex.dry_run(&conn, &stored).unwrap(), r1);
+
+    // Endpoint embeds the issue key; body is ADF (J3), not a plain string.
+    assert!(r1.endpoint.ends_with("/rest/api/3/issue/ALM-1/comment"), "{}", r1.endpoint);
+    let body: Value = serde_json::from_slice(&r1.api_body).unwrap();
+    assert_eq!(body.pointer("/body/type").and_then(Value::as_str), Some("doc"));
+    assert_eq!(body.pointer("/body/version").and_then(Value::as_i64), Some(1));
+    assert_eq!(
+        body.pointer("/body/content/0/content/0/text").and_then(Value::as_str),
+        Some("Acknowledged — Almanac is tracking this; an update will follow.")
+    );
+    // The dry-run display shows that exact ADF.
+    assert!(r1.display.contains("\"type\": \"doc\""), "{}", r1.display);
+}
+
+#[test]
+fn jira_transition_dry_run_is_exact_and_byte_identical() {
+    let (_d, mut conn) = test_db();
+    let id = jira_transition_proposal(&mut conn, "ALM-1", "31");
+    let stored = almanac_core::act::load_proposal(&conn, id).unwrap();
+
+    let r1 = render_jira_transition(JIRA_BASE, &stored).unwrap();
+    let r2 = render_jira_transition(JIRA_BASE, &stored).unwrap();
+    assert_eq!(r1, r2);
+    let ex = JiraTransitionExecutor::new(dummy_jira_auth());
+    assert_eq!(ex.dry_run(&conn, &stored).unwrap(), r1);
+
+    assert!(r1.endpoint.ends_with("/rest/api/3/issue/ALM-1/transitions"), "{}", r1.endpoint);
+    // Exact body: {"transition":{"id":"31"}} (J5: id is a string).
+    let body: Value = serde_json::from_slice(&r1.api_body).unwrap();
+    assert_eq!(body.pointer("/transition/id").and_then(Value::as_str), Some("31"));
+    // The human display names the effect (J7: response is 204 empty).
+    assert!(r1.display.contains("Transition ALM-1"), "{}", r1.display);
+}
+
+#[tokio::test]
+async fn a1_jira_executors_refuse_proposed_and_rejected() {
+    let (_d, mut conn) = test_db();
+    let cid = jira_comment_proposal(&mut conn, "ALM-1");
+    let tid = jira_transition_proposal(&mut conn, "ALM-2", "31");
+    let comment_ex = JiraCommentExecutor::new(dummy_jira_auth());
+    let transition_ex = JiraTransitionExecutor::new(dummy_jira_auth());
+
+    // Proposed → refused (gate fires before any network/token access).
+    assert!(format!("{:#}", comment_ex.execute(&mut conn, cid).await.unwrap_err())
+        .contains("REFUSING"));
+    assert!(format!("{:#}", transition_ex.execute(&mut conn, tid).await.unwrap_err())
+        .contains("REFUSING"));
+    // No execution audit records were written by the refused attempts.
+    assert!(!audit_events(&conn).iter().any(|e| e.starts_with("execution")));
+
+    // Rejected → still refused.
+    almanac_core::act::reject(&mut conn, cid, "user").unwrap();
+    assert!(format!("{:#}", comment_ex.execute(&mut conn, cid).await.unwrap_err())
+        .contains("REFUSING"));
+    assert_eq!(
+        almanac_core::act::load_proposal(&conn, cid).unwrap().state,
+        ProposalState::Rejected
+    );
+}
+
+#[test]
+fn e1_jira_work_done_comment_needs_hard_evidence() {
+    let (_d, conn) = test_db();
+    let issue = store_jira_issue(&conn, "ALM-1");
+    let workdone = TemplatedDraftingBackend
+        .draft(&DraftRequest::JiraWorkDoneComment {
+            ticket: "ALM-1".into(),
+            commit_short: "a1b2c3d".into(),
+            completed_at: "2026-07-14T15:00:00Z".parse().unwrap(),
+            ci_link: Some("https://ci.example.com/runs/9".into()),
+        })
+        .unwrap();
+    assert!(workdone.asserts_work_done);
+
+    // Soft-only evidence → refused (E1).
+    let err = ActionProposal::new(
+        ActionKind::JiraComment,
+        ActionTarget::JiraComment { issue_key: "ALM-1".into() },
+        workdone.clone(),
+        vec![soft_evidence()],
+        "templated-v1",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ProposalViolation::SoftOnlyFactualClaim), "{err}");
+
+    // With the Jira issue (Tier-Hard) → constructs.
+    assert!(ActionProposal::new(
+        ActionKind::JiraComment,
+        ActionTarget::JiraComment { issue_key: "ALM-1".into() },
+        workdone,
+        vec![hard_evidence_for(&issue)],
+        "templated-v1",
+    )
+    .is_ok());
+}
+
+#[test]
+fn e2_jira_target_and_evidence_must_resolve_to_a_stored_issue() {
+    let (_d, mut conn) = test_db();
+    let stored_issue = store_jira_issue(&conn, "ALM-1");
+
+    // Target issue never stored → the proposals FK refuses it at rest.
+    let bad_target = ActionProposal::new(
+        ActionKind::JiraComment,
+        ActionTarget::JiraComment { issue_key: "ALM-999".into() },
+        TemplatedDraftingBackend.draft(&DraftRequest::JiraAckComment).unwrap(),
+        vec![hard_evidence_for(&stored_issue)],
+        "templated-v1",
+    )
+    .unwrap();
+    let err = almanac_core::act::insert_proposal(
+        &mut conn,
+        &bad_target,
+        "test",
+        chrono::Duration::hours(24),
+    )
+    .unwrap_err();
+    assert!(format!("{err:#}").to_lowercase().contains("foreign key"), "{err:#}");
+
+    // Target stored but evidence points to an unstored issue → evidence FK fails.
+    let phantom_ev = EvidenceRef {
+        kind: EvidenceKind::JiraEvent,
+        source: SourceId::Jira,
+        native_id: "ALM-888".into(),
+        deep_link: Some(format!("{JIRA_BASE}/browse/ALM-888")),
+        observed_at: chrono::Utc::now(),
+    };
+    let bad_ev = ActionProposal::new(
+        ActionKind::JiraComment,
+        ActionTarget::JiraComment { issue_key: "ALM-1".into() },
+        TemplatedDraftingBackend.draft(&DraftRequest::JiraAckComment).unwrap(),
+        vec![phantom_ev],
+        "templated-v1",
+    )
+    .unwrap();
+    assert!(format!(
+        "{:#}",
+        almanac_core::act::insert_proposal(&mut conn, &bad_ev, "test", chrono::Duration::hours(24))
+            .unwrap_err()
+    )
+    .to_lowercase()
+    .contains("foreign key"));
+
+    // Fully stored → persists and the evidence resolves as Tier-Hard JiraEvent.
+    let good = jira_comment_proposal(&mut conn, "ALM-1");
+    let loaded = almanac_core::act::load_proposal(&conn, good).unwrap();
+    assert_eq!(loaded.evidence.len(), 1);
+    assert_eq!(loaded.evidence[0].tier, EvidenceTier::Hard);
+    assert_eq!(loaded.evidence[0].kind, EvidenceKind::JiraEvent);
+    assert!(loaded.evidence[0].artifact_deep_link.contains("/browse/ALM-1"));
 }

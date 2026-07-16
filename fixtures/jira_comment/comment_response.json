@@ -1,0 +1,52 @@
+{
+  "self": "https://redacted.atlassian.net/rest/api/3/issue/10005/comment/10000",
+  "id": "10000",
+  "author": {
+    "self": "https://redacted.atlassian.net/rest/api/3/user?accountId=redacted-account-id",
+    "accountId": "redacted-account-id",
+    "emailAddress": "redacted@example.com",
+    "avatarUrls": {
+      "48x48": "https://redacted.example.com/avatar",
+      "24x24": "https://redacted.example.com/avatar",
+      "16x16": "https://redacted.example.com/avatar",
+      "32x32": "https://redacted.example.com/avatar"
+    },
+    "displayName": "Redacted User",
+    "active": true,
+    "timeZone": "America/Chicago",
+    "accountType": "atlassian"
+  },
+  "body": {
+    "type": "doc",
+    "version": 1,
+    "content": [
+      {
+        "type": "paragraph",
+        "content": [
+          {
+            "type": "text",
+            "text": "[redacted]"
+          }
+        ]
+      }
+    ]
+  },
+  "updateAuthor": {
+    "self": "https://redacted.atlassian.net/rest/api/3/user?accountId=redacted-account-id",
+    "accountId": "redacted-account-id",
+    "emailAddress": "redacted@example.com",
+    "avatarUrls": {
+      "48x48": "https://redacted.example.com/avatar",
+      "24x24": "https://redacted.example.com/avatar",
+      "16x16": "https://redacted.example.com/avatar",
+      "32x32": "https://redacted.example.com/avatar"
+    },
+    "displayName": "Redacted User",
+    "active": true,
+    "timeZone": "America/Chicago",
+    "accountType": "atlassian"
+  },
+  "created": "2026-07-14T22:26:03.672-0500",
+  "updated": "2026-07-14T22:26:03.672-0500",
+  "jsdPublic": true
+}

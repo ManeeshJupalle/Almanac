@@ -5,6 +5,7 @@
 
 pub mod gcal;
 pub mod gmail;
+pub mod jira;
 pub mod slack;
 
 use anyhow::Result;

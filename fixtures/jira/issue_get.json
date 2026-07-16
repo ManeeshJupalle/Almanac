@@ -1,0 +1,156 @@
+{
+  "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+  "id": "10005",
+  "self": "https://redacted.atlassian.net/rest/api/3/issue/10005",
+  "key": "ALM-1",
+  "fields": {
+    "statuscategorychangedate": "2026-07-14T22:00:59.870-0500",
+    "issuetype": {
+      "self": "https://redacted.atlassian.net/rest/api/3/issuetype/10008",
+      "id": "10008",
+      "description": "",
+      "iconUrl": "https://redacted.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10318?size=medium",
+      "name": "Task",
+      "subtask": false,
+      "avatarId": 10318,
+      "entityId": "52eef566-b7c7-45eb-8f86-c332d9d0cb3c",
+      "hierarchyLevel": 0
+    },
+    "components": [],
+    "timespent": null,
+    "timeoriginalestimate": null,
+    "project": {
+      "self": "https://redacted.atlassian.net/rest/api/3/project/10001",
+      "id": "10001",
+      "key": "ALM",
+      "name": "Almanac",
+      "projectTypeKey": "software",
+      "simplified": true,
+      "avatarUrls": {
+        "48x48": "https://redacted.example.com/avatar",
+        "24x24": "https://redacted.example.com/avatar",
+        "16x16": "https://redacted.example.com/avatar",
+        "32x32": "https://redacted.example.com/avatar"
+      }
+    },
+    "description": null,
+    "fixVersions": [],
+    "aggregatetimespent": null,
+    "statusCategory": {
+      "self": "https://redacted.atlassian.net/rest/api/3/statuscategory/2",
+      "id": 2,
+      "key": "new",
+      "colorName": "blue-gray",
+      "name": "To Do"
+    },
+    "resolution": null,
+    "timetracking": {},
+    "customfield_10015": null,
+    "security": null,
+    "attachment": [],
+    "aggregatetimeestimate": null,
+    "resolutiondate": null,
+    "workratio": -1,
+    "summary": "Fix audit chain verification failing on empty DB",
+    "issuerestriction": {
+      "issuerestrictions": {},
+      "shouldDisplay": true
+    },
+    "watches": {
+      "self": "https://redacted.atlassian.net/rest/api/3/issue/ALM-1/watchers",
+      "watchCount": 1,
+      "isWatching": true
+    },
+    "lastViewed": "2026-07-14T22:04:53.918-0500",
+    "creator": {
+      "self": "https://redacted.atlassian.net/rest/api/3/user?accountId=redacted-account-id",
+      "accountId": "redacted-account-id",
+      "emailAddress": "redacted@example.com",
+      "avatarUrls": {
+        "48x48": "https://redacted.example.com/avatar",
+        "24x24": "https://redacted.example.com/avatar",
+        "16x16": "https://redacted.example.com/avatar",
+        "32x32": "https://redacted.example.com/avatar"
+      },
+      "displayName": "Redacted User",
+      "active": true,
+      "timeZone": "America/Chicago",
+      "accountType": "atlassian"
+    },
+    "subtasks": [],
+    "created": "2026-07-14T21:54:21.619-0500",
+    "customfield_10021": null,
+    "reporter": {
+      "self": "https://redacted.atlassian.net/rest/api/3/user?accountId=redacted-account-id",
+      "accountId": "redacted-account-id",
+      "emailAddress": "redacted@example.com",
+      "avatarUrls": {
+        "48x48": "https://redacted.example.com/avatar",
+        "24x24": "https://redacted.example.com/avatar",
+        "16x16": "https://redacted.example.com/avatar",
+        "32x32": "https://redacted.example.com/avatar"
+      },
+      "displayName": "Redacted User",
+      "active": true,
+      "timeZone": "America/Chicago",
+      "accountType": "atlassian"
+    },
+    "aggregateprogress": {
+      "progress": 0,
+      "total": 0
+    },
+    "priority": {
+      "self": "https://redacted.atlassian.net/rest/api/3/priority/3",
+      "iconUrl": "https://redacted.atlassian.net/images/icons/priorities/medium_new.svg",
+      "name": "Medium",
+      "id": "3"
+    },
+    "customfield_10001": null,
+    "labels": [],
+    "environment": null,
+    "customfield_10019": "0|i0001v:",
+    "timeestimate": null,
+    "aggregatetimeoriginalestimate": null,
+    "versions": [],
+    "duedate": null,
+    "progress": {
+      "progress": 0,
+      "total": 0
+    },
+    "issuelinks": [],
+    "votes": {
+      "self": "https://redacted.atlassian.net/rest/api/3/issue/ALM-1/votes",
+      "votes": 0,
+      "hasVoted": false
+    },
+    "comment": {
+      "comments": [],
+      "self": "https://redacted.atlassian.net/rest/api/3/issue/10005/comment",
+      "maxResults": 0,
+      "total": 0,
+      "startAt": 0
+    },
+    "assignee": null,
+    "worklog": {
+      "startAt": 0,
+      "maxResults": 20,
+      "total": 0,
+      "worklogs": []
+    },
+    "updated": "2026-07-14T22:01:00.337-0500",
+    "status": {
+      "self": "https://redacted.atlassian.net/rest/api/3/status/10005",
+      "description": "",
+      "iconUrl": "https://redacted.atlassian.net/images/icons/statuses/generic.png",
+      "name": "To Do",
+      "id": "10005",
+      "statusCategory": {
+        "self": "https://redacted.atlassian.net/rest/api/3/statuscategory/2",
+        "id": 2,
+        "key": "new",
+        "colorName": "blue-gray",
+        "name": "To Do"
+      }
+    }
+  }
+}

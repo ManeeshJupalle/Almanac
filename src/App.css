@@ -585,6 +585,16 @@ body {
   border: 1px dashed #9a7d2e;
   padding: 0.05rem 0.4rem;
 }
+.correlation-rationale {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--paper);
+  border-left: 3px solid #4f7a4f;
+  padding: 0.4rem 0.6rem;
+  margin: 0 0 0.7rem;
+}
 .evidence {
   display: flex;
   flex-wrap: wrap;

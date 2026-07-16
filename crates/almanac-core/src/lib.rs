@@ -7,8 +7,10 @@
 pub mod act;
 pub mod adapters;
 pub mod auth;
+pub mod correlate;
 pub mod db;
 pub mod extract;
+pub mod git;
 pub mod synth;
 pub mod types;
 

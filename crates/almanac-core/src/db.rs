@@ -41,6 +41,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "action_layer",
         sql: include_str!("../migrations/0005_action_layer.sql"),
     },
+    Migration {
+        version: 6,
+        name: "jira",
+        sql: include_str!("../migrations/0006_jira.sql"),
+    },
+    Migration {
+        version: 7,
+        name: "git_correlation",
+        sql: include_str!("../migrations/0007_git_correlation.sql"),
+    },
 ];
 
 /// Open the database at `path`, creating parent directories and the file on
@@ -60,6 +70,14 @@ pub fn open(path: &Path) -> Result<Connection> {
 }
 
 /// Apply all pending migrations. Returns how many were applied.
+///
+/// Migrations run with FOREIGN KEY enforcement temporarily OFF (Phase 2.1):
+/// changing a CHECK constraint in SQLite requires drop+recreate of a table
+/// that other tables reference by FK, which is only possible with enforcement
+/// disabled — and the pragma is a no-op inside a transaction. Referential
+/// integrity is re-verified per migration via `PRAGMA foreign_key_check`
+/// INSIDE that migration's transaction, so a rebuild that leaves any dangling
+/// reference rolls back loudly. Enforcement is always restored afterward.
 pub fn migrate(conn: &mut Connection) -> Result<usize> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -68,6 +86,16 @@ pub fn migrate(conn: &mut Connection) -> Result<usize> {
             applied_at TEXT NOT NULL DEFAULT (datetime('now'))
         );",
     )?;
+    let fk_was_on: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    conn.pragma_update(None, "foreign_keys", false)?;
+    let result = apply_pending(conn);
+    // Restore enforcement no matter what — a failed migration must not leave
+    // the connection with FKs silently disabled.
+    let _ = conn.pragma_update(None, "foreign_keys", fk_was_on == 1);
+    result
+}
+
+fn apply_pending(conn: &mut Connection) -> Result<usize> {
     let already_applied = applied_versions(conn)?;
     let mut applied_now = 0;
     for m in MIGRATIONS {
@@ -77,6 +105,19 @@ pub fn migrate(conn: &mut Connection) -> Result<usize> {
         let tx = conn.transaction()?;
         tx.execute_batch(m.sql)
             .with_context(|| format!("applying migration {} ({})", m.version, m.name))?;
+        // Referential integrity check runs even with enforcement off; any
+        // dangling reference a rebuild introduced fails the migration here
+        // (the transaction is dropped → rolled back).
+        {
+            let mut stmt = tx.prepare("PRAGMA foreign_key_check")?;
+            let violations = stmt.query_map([], |_| Ok(()))?.count();
+            anyhow::ensure!(
+                violations == 0,
+                "migration {} ({}) left {violations} dangling foreign-key reference(s)",
+                m.version,
+                m.name
+            );
+        }
         tx.execute(
             "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
             (m.version, m.name),
@@ -491,5 +532,131 @@ mod tests {
                 "source_objects".to_string(),
             ]
         );
+    }
+
+    /// The 0006 rebuild (changing CHECK constraints on FK-referenced tables)
+    /// must PRESERVE all existing rows and leave referential integrity intact —
+    /// the real DB carries v0.1/v2.0 data. Applies through v5, seeds the whole
+    /// FK graph, then applies v6 and checks survival + that 'jira' is admitted.
+    #[test]
+    fn migration_0006_preserves_data_and_admits_jira() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open(&dir.path().join("t.db")).expect("open");
+        // Mirror the runner: FK off while migrating.
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now')));",
+        )
+        .unwrap();
+        for m in &MIGRATIONS[..5] {
+            conn.execute_batch(m.sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                (m.version, m.name),
+            )
+            .unwrap();
+        }
+
+        // Seed across the FK graph (source_objects ← extracted_items,
+        // ← action_proposals target, ← proposal_evidence).
+        conn.execute("INSERT INTO source_objects (source, native_id, deep_link, occurred_at, raw_json) VALUES ('gmail','m1','https://mail.google.com/mail/#all/m1','2026-07-11T00:00:00+00:00','{}')", []).unwrap();
+        conn.execute("INSERT INTO extracted_items (source, native_id, kind, summary, signals_json) VALUES ('gmail','m1','action_needed','s','{}')", []).unwrap();
+        conn.execute("INSERT INTO action_proposals (kind, target_source, target_native_id, draft_body, asserts_work_done, backend_id, expires_at) VALUES ('gmail_reply','gmail','m1','body',0,'templated-v1','2999-01-01T00:00:00+00:00')", []).unwrap();
+        let pid = conn.last_insert_rowid();
+        conn.execute("INSERT INTO proposal_evidence (proposal_id, position, tier, kind, source, native_id, observed_at) VALUES (?1,0,'hard','message','gmail','m1','2026-07-11T00:00:00+00:00')", [pid]).unwrap();
+
+        // Apply 0006.
+        conn.execute_batch(MIGRATIONS[5].sql).unwrap();
+
+        let count = |t: &str| -> i64 {
+            conn.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count("source_objects"), 1, "source_objects rows preserved");
+        assert_eq!(count("extracted_items"), 1, "extracted_items rows preserved");
+        assert_eq!(count("action_proposals"), 1, "action_proposals rows preserved");
+        assert_eq!(count("proposal_evidence"), 1, "proposal_evidence rows preserved");
+
+        // New column exists and is NULL for the migrated row.
+        let tid: Option<String> = conn
+            .query_row("SELECT target_transition_id FROM action_proposals", [], |r| r.get(0))
+            .unwrap();
+        assert!(tid.is_none());
+
+        // 'jira' is now an admitted source + a jira proposal kind persists.
+        conn.execute("INSERT INTO source_objects (source, native_id, deep_link, occurred_at, raw_json) VALUES ('jira','ALM-1','https://redacted.atlassian.net/browse/ALM-1','2026-07-11T00:00:00+00:00','{}')", []).unwrap();
+        conn.execute("INSERT INTO action_proposals (kind, target_source, target_native_id, target_transition_id, draft_body, asserts_work_done, backend_id, expires_at) VALUES ('jira_transition','jira','ALM-1','31','',0,'templated-v1','2999-01-01T00:00:00+00:00')", []).unwrap();
+
+        // Referential integrity intact after all the rebuilds.
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let mut stmt = conn.prepare("PRAGMA foreign_key_check").unwrap();
+        assert_eq!(stmt.query_map([], |_| Ok(())).unwrap().count(), 0, "no dangling FKs");
+    }
+
+    /// The 0007 rebuild (widening source + deep_link + evidence CHECKs, adding a
+    /// column) must PRESERVE existing rows and admit git commits as Tier-Hard
+    /// evidence. Applies through v6, seeds the FK graph, applies v7, checks
+    /// survival + that a git source object, a git-local deep link, a git_commit
+    /// evidence row, and the new correlation_rationale column all work.
+    #[test]
+    fn migration_0007_preserves_data_and_admits_git() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let conn = open(&dir.path().join("t.db")).expect("open");
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now')));",
+        )
+        .unwrap();
+        for m in &MIGRATIONS[..6] {
+            conn.execute_batch(m.sql).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)",
+                (m.version, m.name),
+            )
+            .unwrap();
+        }
+
+        // Seed the FK graph as it stands at v6.
+        conn.execute("INSERT INTO source_objects (source, native_id, deep_link, occurred_at, raw_json) VALUES ('gmail','m1','https://mail.google.com/mail/#all/m1','2026-07-11T00:00:00+00:00','{}')", []).unwrap();
+        conn.execute("INSERT INTO extracted_items (source, native_id, kind, summary, signals_json) VALUES ('gmail','m1','action_needed','s','{}')", []).unwrap();
+        conn.execute("INSERT INTO action_proposals (kind, target_source, target_native_id, draft_body, asserts_work_done, backend_id, expires_at) VALUES ('gmail_reply','gmail','m1','body',1,'templated-v1','2999-01-01T00:00:00+00:00')", []).unwrap();
+        let pid = conn.last_insert_rowid();
+        conn.execute("INSERT INTO proposal_evidence (proposal_id, position, tier, kind, source, native_id, observed_at) VALUES (?1,0,'hard','message','gmail','m1','2026-07-11T00:00:00+00:00')", [pid]).unwrap();
+
+        // Apply 0007.
+        conn.execute_batch(MIGRATIONS[6].sql).unwrap();
+
+        let count = |t: &str| -> i64 {
+            conn.query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(count("source_objects"), 1);
+        assert_eq!(count("action_proposals"), 1);
+        assert_eq!(count("proposal_evidence"), 1);
+
+        // A git source object with a git-local deep link is now admitted.
+        let sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        conn.execute(
+            "INSERT INTO source_objects (source, native_id, deep_link, occurred_at, raw_json)
+             VALUES ('git', ?1, ?2, '2026-07-11T00:00:00+00:00', '{}')",
+            (sha, format!("git-local://scratch/commit/{sha}")),
+        )
+        .unwrap();
+        // git_commit evidence (Tier-Hard) resolves via the composite FK.
+        conn.execute("INSERT INTO proposal_evidence (proposal_id, position, tier, kind, source, native_id, observed_at) VALUES (?1,1,'hard','git_commit','git',?2,'2026-07-11T00:00:00+00:00')", (pid, sha)).unwrap();
+
+        // The correlation_rationale column exists and round-trips.
+        conn.execute("UPDATE action_proposals SET correlation_rationale = 'why' WHERE id = ?1", [pid]).unwrap();
+        let r: Option<String> = conn
+            .query_row("SELECT correlation_rationale FROM action_proposals WHERE id = ?1", [pid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(r.as_deref(), Some("why"));
+
+        // Referential integrity intact.
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let mut stmt = conn.prepare("PRAGMA foreign_key_check").unwrap();
+        assert_eq!(stmt.query_map([], |_| Ok(())).unwrap().count(), 0, "no dangling FKs");
     }
 }

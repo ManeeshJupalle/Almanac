@@ -16,8 +16,34 @@ pub fn apply(source: SourceId, raw: &Value, text: &str) -> (Option<ItemKind>, Ve
         SourceId::GoogleCalendar => gcal_rules(raw, &mut hits),
         SourceId::Slack => slack_rules(raw, text, &mut hits),
         SourceId::Gmail => gmail_rules(raw, text, &mut hits),
+        SourceId::Jira => jira_rules(raw, &mut hits),
+        // Git commits are evidence, not asks — GitWatcher stores them without
+        // running extraction, so this arm is defensive (never reached).
+        SourceId::Git => None,
     };
     (verdict, hits)
+}
+
+/// High-precision Jira rule by workflow status CATEGORY (stable across
+/// projects: `new` = To Do, `indeterminate` = In Progress/Review, `done` =
+/// Done). An open issue is an action; a done issue is retained noise.
+fn jira_rules(raw: &Value, hits: &mut Vec<String>) -> Option<ItemKind> {
+    let category = raw
+        .pointer("/fields/status/statusCategory/key")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match category {
+        "done" => {
+            hits.push("jira:status-done".into());
+            Some(ItemKind::Noise)
+        }
+        "new" | "indeterminate" => {
+            hits.push(format!("jira:status-{category}"));
+            Some(ItemKind::ActionNeeded)
+        }
+        // Unknown/absent category — let the semantic classifier decide.
+        _ => None,
+    }
 }
 
 fn gcal_rules(raw: &Value, hits: &mut Vec<String>) -> Option<ItemKind> {

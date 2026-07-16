@@ -98,11 +98,18 @@ impl EvidenceKind {
         })
     }
 
-    /// Phase 2.0: only source-object-backed kinds have an artifact store, so
-    /// only they can be persisted (FK-enforced). Later phases add stores +
-    /// new migrations for the rest.
+    /// Only source-object-backed kinds have an artifact store, so only they
+    /// can be persisted (FK-enforced). Phase 2.1 adds Jira issues, Phase 2.2
+    /// adds git commits (GitWatcher stores them as `source = git` source
+    /// objects). CI/observation stores arrive in later phases.
     pub fn artifact_store_available(&self) -> bool {
-        matches!(self, EvidenceKind::Message | EvidenceKind::CalendarEvent)
+        matches!(
+            self,
+            EvidenceKind::Message
+                | EvidenceKind::CalendarEvent
+                | EvidenceKind::JiraEvent
+                | EvidenceKind::GitCommit
+        )
     }
 }
 
@@ -127,11 +134,14 @@ impl EvidenceRef {
 
 // ----------------------------------------------------------- proposals ----
 
-/// The two Phase 2.0 action kinds (§7 lists more; they arrive in 2.1).
+/// Action kinds. Phase 2.0: gmail_reply, slack_post. Phase 2.1 adds the two
+/// Jira write actions (§7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
     GmailReply,
     SlackPost,
+    JiraTransition,
+    JiraComment,
 }
 
 impl ActionKind {
@@ -139,6 +149,8 @@ impl ActionKind {
         match self {
             ActionKind::GmailReply => "gmail_reply",
             ActionKind::SlackPost => "slack_post",
+            ActionKind::JiraTransition => "jira_transition",
+            ActionKind::JiraComment => "jira_comment",
         }
     }
 
@@ -146,6 +158,8 @@ impl ActionKind {
         Some(match s {
             "gmail_reply" => ActionKind::GmailReply,
             "slack_post" => ActionKind::SlackPost,
+            "jira_transition" => ActionKind::JiraTransition,
+            "jira_comment" => ActionKind::JiraComment,
             _ => return None,
         })
     }
@@ -159,6 +173,12 @@ pub enum ActionTarget {
     /// Post to a Slack channel by id (channels are not source objects; the
     /// grounding requirement lives on the evidence).
     SlackChannel { channel_id: String },
+    /// Transition a stored Jira issue via a workflow transition id. The issue
+    /// (by key) must resolve to a stored source object (FK at rest); the
+    /// transition id is re-validated live at execute time (J6 hazard).
+    JiraTransition { issue_key: String, transition_id: String, transition_name: String },
+    /// Comment on a stored Jira issue (by key; FK at rest).
+    JiraComment { issue_key: String },
 }
 
 /// Proposal lifecycle (ARCHITECTURE_V2 §5).
@@ -243,6 +263,10 @@ pub struct ActionProposal {
     draft: Draft,
     evidence: Vec<EvidenceRef>,
     backend_id: String,
+    /// Templated, human-readable explanation of the correlation that produced
+    /// this proposal (Phase 2.2). `None` for dev-seeded proposals. Shown in the
+    /// approval UI so the confidence/basis is visible before approval.
+    correlation_rationale: Option<String>,
 }
 
 impl ActionProposal {
@@ -268,6 +292,23 @@ impl ActionProposal {
                     ));
                 }
             }
+            (
+                ActionKind::JiraTransition,
+                ActionTarget::JiraTransition { issue_key, transition_id, .. },
+            ) => {
+                if issue_key.trim().is_empty() || transition_id.trim().is_empty() {
+                    return Err(ProposalViolation::TargetMismatch(
+                        "jira transition needs a non-empty issue key and transition id".into(),
+                    ));
+                }
+            }
+            (ActionKind::JiraComment, ActionTarget::JiraComment { issue_key }) => {
+                if issue_key.trim().is_empty() {
+                    return Err(ProposalViolation::TargetMismatch(
+                        "jira comment target issue key is empty".into(),
+                    ));
+                }
+            }
             _ => {
                 return Err(ProposalViolation::TargetMismatch(format!(
                     "action kind {} does not match its target",
@@ -286,16 +327,28 @@ impl ActionProposal {
                 ));
             }
             match e.tier() {
-                EvidenceTier::Hard => match &e.deep_link {
-                    Some(l) if l.starts_with("https://") => {}
-                    _ => {
+                EvidenceTier::Hard => {
+                    // A local git commit has no web URL — its stable ref is the
+                    // documented `git-local://` form (or an https web URL when
+                    // the repo has a remote). Every OTHER hard kind links out
+                    // over https, unchanged. This admits a NEW ref form for a
+                    // new kind; it does not relax the requirement for any
+                    // existing source.
+                    let link_ok = match &e.deep_link {
+                        Some(l) if e.kind == EvidenceKind::GitCommit => {
+                            l.starts_with("https://") || l.starts_with("git-local://")
+                        }
+                        Some(l) => l.starts_with("https://"),
+                        None => false,
+                    };
+                    if !link_ok {
                         return Err(ProposalViolation::MalformedEvidence(format!(
-                            "hard evidence {}:{} must carry an https deep link",
+                            "hard evidence {}:{} must carry a resolvable deep link",
                             e.kind.as_str(),
                             e.native_id
-                        )))
+                        )));
                     }
-                },
+                }
                 EvidenceTier::Soft => {}
             }
             // kind ↔ source coherence for source-object-backed kinds.
@@ -304,6 +357,8 @@ impl ActionProposal {
                     matches!(e.source, SourceId::Gmail | SourceId::Slack)
                 }
                 EvidenceKind::CalendarEvent => matches!(e.source, SourceId::GoogleCalendar),
+                EvidenceKind::JiraEvent => matches!(e.source, SourceId::Jira),
+                EvidenceKind::GitCommit => matches!(e.source, SourceId::Git),
                 _ => true,
             };
             if !coherent {
@@ -320,7 +375,21 @@ impl ActionProposal {
             return Err(ProposalViolation::SoftOnlyFactualClaim);
         }
 
-        Ok(Self { kind, target, draft, evidence, backend_id: backend_id.to_string() })
+        Ok(Self {
+            kind,
+            target,
+            draft,
+            evidence,
+            backend_id: backend_id.to_string(),
+            correlation_rationale: None,
+        })
+    }
+
+    /// Attach a templated correlation rationale (the correlation Proposer sets
+    /// this). Purely additive metadata — does not affect E1/E2 validation.
+    pub fn with_rationale(mut self, rationale: impl Into<String>) -> Self {
+        self.correlation_rationale = Some(rationale.into());
+        self
     }
 
     pub fn kind(&self) -> ActionKind {
@@ -334,6 +403,9 @@ impl ActionProposal {
     }
     pub fn evidence(&self) -> &[EvidenceRef] {
         &self.evidence
+    }
+    pub fn correlation_rationale(&self) -> Option<&str> {
+        self.correlation_rationale.as_deref()
     }
 }
 
@@ -367,6 +439,9 @@ pub struct StoredProposal {
     pub created_at: String,
     pub expires_at: String,
     pub receipt_json: Option<String>,
+    /// Templated correlation basis/confidence (Phase 2.2), if this proposal came
+    /// from the correlation engine. Shown in the approval UI.
+    pub correlation_rationale: Option<String>,
     pub evidence: Vec<StoredEvidence>,
 }
 
@@ -382,39 +457,60 @@ pub fn insert_proposal(
     for e in proposal.evidence() {
         ensure!(
             e.kind.artifact_store_available(),
-            "evidence kind {} has no artifact store in Phase 2.0 and cannot be persisted \
+            "evidence kind {} has no artifact store yet and cannot be persisted \
              (its store + FK arrive with the phase that introduces its observer)",
             e.kind.as_str()
         );
     }
 
-    let (target_source, target_native_id, target_channel) = match proposal.target() {
-        ActionTarget::GmailThread { message_native_id } => {
-            (Some("gmail"), Some(message_native_id.as_str()), None)
-        }
-        ActionTarget::SlackChannel { channel_id } => (None, None, Some(channel_id.as_str())),
-    };
+    // Target mapping. Gmail message + Jira issue targets both resolve through
+    // the composite (target_source, target_native_id) FK to source_objects, so
+    // an unstored reply/issue target FAILS LOUDLY here (E2).
+    let (target_source, target_native_id, target_channel, transition_id, transition_name) =
+        match proposal.target() {
+            ActionTarget::GmailThread { message_native_id } => {
+                (Some("gmail"), Some(message_native_id.as_str()), None, None, None)
+            }
+            ActionTarget::SlackChannel { channel_id } => {
+                (None, None, Some(channel_id.as_str()), None, None)
+            }
+            ActionTarget::JiraTransition { issue_key, transition_id, transition_name } => (
+                Some("jira"),
+                Some(issue_key.as_str()),
+                None,
+                Some(transition_id.as_str()),
+                Some(transition_name.as_str()),
+            ),
+            ActionTarget::JiraComment { issue_key } => {
+                (Some("jira"), Some(issue_key.as_str()), None, None, None)
+            }
+        };
     let expires_at = (chrono::Utc::now() + ttl).to_rfc3339();
 
     let tx = conn.transaction()?;
     tx.execute(
         "INSERT INTO action_proposals
              (kind, state, target_source, target_native_id, target_channel,
-              draft_subject, draft_body, asserts_work_done, backend_id, expires_at)
-         VALUES (?1, 'proposed', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+              target_transition_id, target_transition_name,
+              draft_subject, draft_body, asserts_work_done, backend_id, expires_at,
+              correlation_rationale)
+         VALUES (?1, 'proposed', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         (
             proposal.kind().as_str(),
             target_source,
             target_native_id,
             target_channel,
+            transition_id,
+            transition_name,
             proposal.draft().subject.as_deref(),
             &proposal.draft().body,
             proposal.draft().asserts_work_done as i64,
             &proposal.backend_id,
             &expires_at,
+            proposal.correlation_rationale(),
         ),
     )
-    .context("persisting proposal (an FK failure here means the reply target is not a stored source object)")?;
+    .context("persisting proposal (an FK failure here means the reply/issue target is not a stored source object)")?;
     let id = tx.last_insert_rowid();
 
     for (position, e) in proposal.evidence().iter().enumerate() {
@@ -453,8 +549,9 @@ pub fn load_proposal(conn: &Connection, id: i64) -> Result<StoredProposal> {
     let row = conn
         .query_row(
             "SELECT kind, state, target_source, target_native_id, target_channel,
+                    target_transition_id, target_transition_name,
                     draft_subject, draft_body, asserts_work_done, backend_id,
-                    created_at, expires_at, receipt_json
+                    created_at, expires_at, receipt_json, correlation_rationale
              FROM action_proposals WHERE id = ?1",
             [id],
             |row| {
@@ -465,12 +562,15 @@ pub fn load_proposal(conn: &Connection, id: i64) -> Result<StoredProposal> {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
+                    row.get::<_, i64>(9)?,
                     row.get::<_, String>(10)?,
-                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
                 ))
             },
         )
@@ -483,6 +583,8 @@ pub fn load_proposal(conn: &Connection, id: i64) -> Result<StoredProposal> {
         _target_source,
         target_native_id,
         target_channel,
+        target_transition_id,
+        target_transition_name,
         draft_subject,
         draft_body,
         asserts_work_done,
@@ -490,6 +592,7 @@ pub fn load_proposal(conn: &Connection, id: i64) -> Result<StoredProposal> {
         created_at,
         expires_at,
         receipt_json,
+        correlation_rationale,
     ) = row;
 
     let kind = ActionKind::parse(&kind).with_context(|| format!("unknown action kind '{kind}'"))?;
@@ -502,6 +605,17 @@ pub fn load_proposal(conn: &Connection, id: i64) -> Result<StoredProposal> {
         },
         ActionKind::SlackPost => ActionTarget::SlackChannel {
             channel_id: target_channel.context("slack_post proposal missing target_channel")?,
+        },
+        ActionKind::JiraTransition => ActionTarget::JiraTransition {
+            issue_key: target_native_id
+                .context("jira_transition proposal missing target issue key")?,
+            transition_id: target_transition_id
+                .context("jira_transition proposal missing target_transition_id")?,
+            transition_name: target_transition_name.unwrap_or_default(),
+        },
+        ActionKind::JiraComment => ActionTarget::JiraComment {
+            issue_key: target_native_id
+                .context("jira_comment proposal missing target issue key")?,
         },
     };
 
@@ -560,6 +674,7 @@ pub fn load_proposal(conn: &Connection, id: i64) -> Result<StoredProposal> {
         created_at,
         expires_at,
         receipt_json,
+        correlation_rationale,
         evidence,
     };
 
@@ -845,5 +960,85 @@ mod tests {
             insert_proposal(&mut conn, &proposal, "test", chrono::Duration::hours(24)).unwrap();
         // Still 'proposed' — no claim possible.
         assert!(claim_execution(&mut conn, id, &audit::sha256_hex(b"x")).is_err());
+    }
+
+    /// Phase 2.1 hazard (J6): when a transition is no longer valid at execute
+    /// time, the executor finalizes execution_failed and applies NOTHING — no
+    /// `execution_started` claim (so no write was attempted), state is
+    /// execution_failed, and the failure is audited. This exercises the exact
+    /// finalize path the executor takes on its invalid-transition branch.
+    #[test]
+    fn transition_invalidated_at_execute_fails_safely_without_applying() {
+        let (_d, mut conn) = test_db();
+        let obj = SourceObject {
+            provenance: ProvenanceRef {
+                source: SourceId::Jira,
+                native_id: "ALM-1".into(),
+                deep_link: "https://x.atlassian.net/browse/ALM-1".into(),
+            },
+            raw: RawContent::new(serde_json::json!({"key": "ALM-1"})),
+            occurred_at: chrono::Utc::now(),
+        };
+        crate::db::insert_source_object(&conn, &obj).unwrap();
+        let proposal = ActionProposal::new(
+            ActionKind::JiraTransition,
+            ActionTarget::JiraTransition {
+                issue_key: "ALM-1".into(),
+                transition_id: "999".into(),
+                transition_name: "Done".into(),
+            },
+            Draft::raw_for_tests(None, "Move ALM-1 to Done.".into(), false),
+            vec![EvidenceRef {
+                kind: EvidenceKind::JiraEvent,
+                source: SourceId::Jira,
+                native_id: "ALM-1".into(),
+                deep_link: Some("https://x.atlassian.net/browse/ALM-1".into()),
+                observed_at: chrono::Utc::now(),
+            }],
+            "templated-v1",
+        )
+        .unwrap();
+        let id =
+            insert_proposal(&mut conn, &proposal, "test", chrono::Duration::hours(24)).unwrap();
+        approve(&mut conn, id, "user").unwrap();
+
+        // The live-offered set (999 is absent) — this is the decision the
+        // executor makes before any write.
+        let offered = ["11".to_string(), "21".to_string()];
+        assert!(!offered.contains(&"999".to_string()), "precondition: 999 not offered");
+
+        // Executor's invalid-transition branch: finalize_execution(error) with
+        // NO preceding claim_execution.
+        let seq = finalize_execution(&mut conn, id, None, "transition 999 no longer valid".into())
+            .unwrap();
+
+        let stored = load_proposal(&conn, id).unwrap();
+        assert_eq!(stored.state, ProposalState::ExecutionFailed);
+
+        // No write was attempted: execution_claimed_at is still NULL.
+        let claimed: Option<String> = conn
+            .query_row(
+                "SELECT execution_claimed_at FROM action_proposals WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(claimed.is_none(), "no execution should have been claimed (nothing applied)");
+
+        // Audited as execution_failed, with NO execution_started record.
+        let events = audit_events(&conn);
+        assert!(events.contains(&"execution_failed".to_string()));
+        assert!(
+            !events.contains(&"execution_started".to_string()),
+            "a failed re-validation must not emit execution_started (no partial apply)"
+        );
+        // Chain still verifies after all of this.
+        audit::verify_chain(&conn).unwrap();
+        let _ = seq;
+    }
+
+    fn audit_events(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("SELECT event FROM audit_records ORDER BY seq ASC").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
     }
 }

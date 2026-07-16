@@ -1,0 +1,6 @@
+{
+  "errorMessages": [
+    "The requested API has been removed. Please migrate to the /rest/api/3/search/jql API. A full migration guideline is available at https://developer.atlassian.com/changelog/#CHANGE-2046"
+  ],
+  "errors": {}
+}

@@ -347,6 +347,63 @@ impl SlackAuth {
     }
 }
 
+// --------------------------------------------------------------- Jira ------
+
+/// Jira Cloud auth (Phase 2.1): HTTP Basic over `base64(email:api_token)`.
+///
+/// A2 scope isolation: this struct reads ONLY `JIRA_*` config and its own
+/// encrypted token file — it holds no reference to `GoogleAuth`/`SlackAuth`
+/// and cannot reach their tokens (and they cannot reach Jira's). The
+/// email+token pair is stored DPAPI-encrypted at `JIRA_TOKEN_PATH`, like the
+/// other connectors; the raw `JIRA_API_TOKEN` env var is only the one-time
+/// bootstrap consumed by `fixture-capture jira-auth`.
+#[derive(Debug, Clone)]
+pub struct JiraAuth {
+    /// Site base, no trailing slash (e.g. https://yoursite.atlassian.net).
+    pub base_url: String,
+    pub token_path: PathBuf,
+}
+
+impl JiraAuth {
+    pub fn from_env() -> Result<Self> {
+        Ok(Self {
+            base_url: std::env::var("JIRA_BASE_URL")
+                .context("missing JIRA_BASE_URL (see .env.example)")?
+                .trim_end_matches('/')
+                .to_string(),
+            token_path: std::env::var("JIRA_TOKEN_PATH")
+                .context("missing JIRA_TOKEN_PATH (see .env.example)")?
+                .into(),
+        })
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn ensure_authenticated(&self) -> Result<()> {
+        load_token(&self.token_path).map(|_| ()).context(
+            "no Jira token — run `cargo run -p fixture-capture -- jira-auth` once",
+        )
+    }
+
+    /// `Authorization: Basic …` header value, built from the encrypted store.
+    /// Never logged; callers pass it straight to reqwest.
+    pub fn basic_auth_header(&self) -> Result<String> {
+        let token = load_token(&self.token_path)?;
+        let email = token
+            .get("email")
+            .and_then(Value::as_str)
+            .context("stored Jira token missing email")?;
+        let api_token = token
+            .get("api_token")
+            .and_then(Value::as_str)
+            .context("stored Jira token missing api_token")?;
+        let raw = format!("{email}:{api_token}");
+        Ok(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(raw)))
+    }
+}
+
 /// Printable, secret-free proof that a refresh actually happened.
 #[derive(Debug)]
 pub struct RefreshEvidence {
