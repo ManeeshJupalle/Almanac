@@ -51,6 +51,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "git_correlation",
         sql: include_str!("../migrations/0007_git_correlation.sql"),
     },
+    Migration {
+        version: 8,
+        name: "correlation_idempotency",
+        sql: include_str!("../migrations/0008_correlation_idempotency.sql"),
+    },
 ];
 
 /// Open the database at `path`, creating parent directories and the file on

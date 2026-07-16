@@ -49,6 +49,9 @@ fn main() -> ExitCode {
         // Phase 2.2: correlate asks ↔ Jira issues ↔ commits and queue proposals
         // for the Full (ask+item+commit) threads. Reads only; no external writes.
         Some("correlate") => block_on(correlate_cmd()),
+        // Phase 2.3: prioritized plan (read-only) and a triggered, audited re-plan.
+        Some("plan") => plan_cmd(),
+        Some("replan") => block_on(replan_cmd(args.get(1).cloned())),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
             println!(
@@ -94,6 +97,10 @@ fn main() -> ExitCode {
                  Correlation (Phase 2.2):\n\
                  \x20 git-watch                read local repos (ALMANAC_GIT_REPOS) -> commit evidence\n\
                  \x20 correlate                bind asks<->issues<->commits, queue proposals (read-only)\n\
+                 \n\
+                 Planning (Phase 2.3):\n\
+                 \x20 plan                     show the prioritized plan (do now / by EOD / can wait)\n\
+                 \x20 replan [reason]          run one audited re-plan cycle (idempotent queueing)\n\
                  \x20 debug-seed-proposal <gmail-ack|slack-check|jira-comment|jira-transition> [native_id]\n\
                  \x20                          DEV-ONLY: seed a test proposal from a stored\n\
                  \x20                          source object (correlation arrives in 2.2)\n\
@@ -563,37 +570,91 @@ async fn correlate_cmd() -> Result<()> {
     let threads = engine.correlate(&asks, &items, &commits);
     let backend = TemplatedDraftingBackend;
 
-    let mut queued = 0usize;
     println!("\n{} work thread(s):", threads.len());
     for t in &threads {
         println!(
-            "  {} · confidence {} — {} ask(s), {} commit(s)",
+            "  {} · confidence {} — {} ask(s), {} commit(s){}",
             t.item.key,
             t.confidence.as_str(),
             t.asks.len(),
-            t.evidence.len()
+            t.evidence.len(),
+            if t.is_full() { "" } else { "  (possible match — no proposal)" }
         );
-        if t.is_full() {
-            for proposal in correlate::propose_from_thread(t, &backend)? {
-                let id = almanac_core::act::insert_proposal(
-                    &mut conn,
-                    &proposal,
-                    "correlation",
-                    Duration::hours(24),
-                )?;
-                queued += 1;
-                println!("     -> queued proposal #{id} ({})", proposal.kind().as_str());
-            }
-        } else {
-            println!("     (possible match — surfaced for your confirmation; no proposal queued)");
-        }
     }
+
+    // Idempotent queueing (Phase 2.3): duplicates are skipped, rejected proposals
+    // are never resurrected — safe to re-run every cycle.
+    let outcome = correlate::queue_proposals(
+        &mut conn,
+        &threads,
+        &backend,
+        "correlation",
+        Duration::hours(24),
+    )?;
     println!(
-        "\ncorrelate: {} proposal(s) queued from {} full thread(s). Approve them in the app.",
-        queued,
+        "\ncorrelate: {} proposal(s) queued, {} skipped as duplicates ({} full thread(s)). Approve them in the app.",
+        outcome.queued,
+        outcome.skipped,
         threads.iter().filter(|t| t.is_full()).count()
     );
     Ok(())
+}
+
+/// Phase 2.3: show the current prioritized plan (read-only — no queueing, no
+/// audit). Sections: do now / by EOD / can wait, each item with its factor
+/// breakdown.
+fn plan_cmd() -> Result<()> {
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let now = Utc::now();
+    let candidates = almanac_core::plan::load_candidates(&conn, now)?;
+    let config = almanac_core::plan::PriorityConfig::from_env();
+    let plan = almanac_core::plan::prioritize(&candidates, &config, now);
+    print_plan(&plan);
+    Ok(())
+}
+
+/// Phase 2.3: run ONE re-plan cycle — idempotently queue proposals, re-rank, and
+/// append a traceable audit record (actor + reason). Read-only externally.
+async fn replan_cmd(reason: Option<String>) -> Result<()> {
+    let reason = reason.unwrap_or_else(|| "manual refresh".to_string());
+    let mut conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+
+    // J15 self-exclusion (best-effort, like correlate).
+    let self_id = match almanac_core::auth::JiraAuth::from_env() {
+        Ok(auth) => almanac_core::adapters::jira::fetch_self_account_id(&auth).await.ok(),
+        Err(_) => None,
+    };
+    let config = almanac_core::plan::PriorityConfig::from_env();
+    let report = almanac_core::plan::replan_cycle(
+        &mut conn,
+        &config,
+        self_id,
+        "user",
+        &reason,
+        Utc::now(),
+    )?;
+    println!("replan cycle: {}", report.summary);
+    println!("  audited as seq {} (chain-verifiable)", report.audit_seq);
+    print_plan(&report.plan);
+    Ok(())
+}
+
+/// Render a plan grouped into its three sections, each item with its rationale.
+fn print_plan(plan: &almanac_core::plan::Plan) {
+    use almanac_core::plan::Section;
+    println!("{}", plan.summary);
+    for section in [Section::DoNow, Section::ByEod, Section::CanWait] {
+        let items: Vec<_> = plan.items.iter().filter(|i| i.section == section).collect();
+        if items.is_empty() {
+            continue;
+        }
+        println!("\n[{}]", section.as_str().to_uppercase());
+        for item in items {
+            println!("  {}. {} (score {})", item.rank, item.candidate.title, item.score);
+            println!("     why: {}", item.rationale);
+            println!("     {}", item.candidate.deep_link);
+        }
+    }
 }
 
 /// First line of an error chain (short console notes).

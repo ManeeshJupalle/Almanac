@@ -11,6 +11,7 @@ pub mod correlate;
 pub mod db;
 pub mod extract;
 pub mod git;
+pub mod plan;
 pub mod synth;
 pub mod types;
 

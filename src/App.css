@@ -595,6 +595,126 @@ body {
   padding: 0.4rem 0.6rem;
   margin: 0 0 0.7rem;
 }
+/* ------------------------------------------------ prioritized plan (2.3) */
+.plan {
+  margin-bottom: 1.6rem;
+}
+.plan-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  font-size: 1.05rem;
+  margin-bottom: 0.2rem;
+}
+.plan-sub {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--muted);
+  font-weight: 400;
+}
+.replan-btn {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+  color: var(--ink);
+  cursor: pointer;
+}
+.replan-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.plan-meta {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  color: var(--muted);
+  margin: 0 0 0.8rem;
+}
+.plan-section {
+  margin-bottom: 0.9rem;
+  border-left: 3px solid var(--rule-strong);
+  padding-left: 0.7rem;
+}
+.plan-section.section-do-now {
+  border-left-color: #a6492e;
+}
+.plan-section.section-by-EOD {
+  border-left-color: #9a7d2e;
+}
+.plan-section.section-can-wait {
+  border-left-color: #8a8069;
+}
+.plan-section-head {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 0 0 0.4rem;
+}
+.plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+.plan-item-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.plan-rank {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+.plan-title {
+  font-family: inherit;
+  font-size: 0.9rem;
+  color: var(--ink);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.plan-title:hover {
+  text-decoration: underline;
+}
+.plan-kind {
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  color: var(--muted);
+}
+.plan-score {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+.plan-factors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.3rem;
+}
+.factor-chip {
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--rule);
+  color: var(--muted);
+  cursor: help;
+}
+
 .evidence {
   display: flex;
   flex-wrap: wrap;

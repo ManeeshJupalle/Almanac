@@ -60,6 +60,25 @@ type Proposal = {
   evidence: Evidence[];
 };
 
+type Factor = { name: string; points: number; reason: string };
+
+type PlanItem = {
+  rank: number;
+  title: string;
+  kind: string;
+  section: "do now" | "by EOD" | "can wait";
+  score: number;
+  rationale: string;
+  deepLink: string;
+  factors: Factor[];
+};
+
+type Plan = {
+  summary: string;
+  generatedAt: string;
+  items: PlanItem[];
+};
+
 const PROPOSAL_KIND_LABEL: Record<Proposal["kind"], string> = {
   gmail_reply: "Gmail reply",
   slack_post: "Slack post",
@@ -96,6 +115,8 @@ function App() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [chainStatus, setChainStatus] = useState<string | null>(null);
+  const [plan, setPlan] = useState<Plan | null>(null);
+  const [replanning, setReplanning] = useState(false);
 
   const loadProposals = useCallback(async () => {
     try {
@@ -112,17 +133,35 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, stored] = await Promise.all([
+      const [status, stored, thePlan] = await Promise.all([
         invoke<SourceStatus[]>("get_connection_status"),
         invoke<Briefing | null>("get_briefing"),
+        invoke<Plan>("get_plan"),
       ]);
       setStatuses(status);
       setBriefing(stored);
+      setPlan(thePlan);
       await loadProposals();
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
+    }
+  }, [loadProposals]);
+
+  const runReplan = useCallback(async () => {
+    setReplanning(true);
+    setError(null);
+    try {
+      // Triggered, audited re-plan cycle (idempotent queueing). Refreshes both
+      // the plan and the approval queue so any newly-queued proposals appear.
+      const fresh = await invoke<Plan>("replan", { reason: "manual refresh" });
+      setPlan(fresh);
+      await loadProposals();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setReplanning(false);
     }
   }, [loadProposals]);
 
@@ -354,6 +393,74 @@ function App() {
               </p>
             )}
           </div>
+        )}
+
+        {!loading && plan && plan.items.length > 0 && (
+          <section className="plan" aria-label="Prioritized plan">
+            <h2 className="plan-head">
+              Today's plan
+              <span className="plan-sub">{plan.summary}</span>
+              <button
+                className="replan-btn"
+                onClick={runReplan}
+                disabled={replanning}
+                title="Re-plan: re-correlate, queue any new proposals (idempotent), re-rank, and audit the cycle."
+              >
+                {replanning ? "re-planning…" : "↻ Refresh plan"}
+              </button>
+            </h2>
+            <p className="plan-meta">
+              deterministic order — every rank shows its factors · updated{" "}
+              {new Date(plan.generatedAt).toLocaleTimeString()}
+            </p>
+            {(["do now", "by EOD", "can wait"] as const).map((sec) => {
+              const items = plan.items.filter((i) => i.section === sec);
+              if (items.length === 0) return null;
+              return (
+                <div
+                  key={sec}
+                  className={`plan-section section-${sec.replace(/ /g, "-")}`}
+                >
+                  <h3 className="plan-section-head">{sec}</h3>
+                  <ul className="plan-list">
+                    {items.map((i) => (
+                      <li key={i.rank} className="plan-item">
+                        <div className="plan-item-top">
+                          <span className="plan-rank">#{i.rank}</span>
+                          <button
+                            className="plan-title"
+                            onClick={() =>
+                              openSource({
+                                deepLink: i.deepLink,
+                              } as unknown as BriefingItem)
+                            }
+                            title={i.deepLink}
+                          >
+                            {i.title} ↗
+                          </button>
+                          <span className="plan-kind">{i.kind}</span>
+                          <span className="plan-score" title="priority score">
+                            {i.score}
+                          </span>
+                        </div>
+                        <div className="plan-factors" aria-label="Factor breakdown">
+                          {i.factors.map((f, idx) => (
+                            <span
+                              key={idx}
+                              className="factor-chip"
+                              title={f.reason}
+                            >
+                              {f.name} +{f.points}
+                            </span>
+                          ))}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </section>
         )}
 
         {!loading && proposals.length > 0 && (

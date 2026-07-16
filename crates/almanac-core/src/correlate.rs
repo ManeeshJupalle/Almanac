@@ -52,12 +52,14 @@ fn mentions_key(text: &str, key: &str) -> bool {
 // ------------------------------------------------------------- inputs ------
 
 /// An ask: something a person asked, from Gmail/Slack. `text` is scanned for
-/// keys; `subject` (Gmail only) threads the reply.
+/// keys; `subject` (Gmail only) threads the reply; `asker` (Gmail From / Slack
+/// user) feeds the prioritizer's asker-weight factor (Phase 2.3).
 #[derive(Debug, Clone)]
 pub struct AskInput {
     pub provenance: ProvenanceRef,
     pub subject: Option<String>,
     pub text: String,
+    pub asker: Option<String>,
     pub occurred_at: DateTime<Utc>,
 }
 
@@ -332,12 +334,63 @@ pub fn propose_from_thread(
             sites = sites,
         );
 
+        // Idempotency key (Phase 2.3): the (ask, work item, evidence) triple —
+        // the reply-target message, the issue key, and the sorted commit shas.
+        let mut shas: Vec<String> =
+            thread.evidence.iter().map(|ec| ec.commit.sha.clone()).collect();
+        shas.sort();
+        let correlation_key = format!(
+            "{}:{}|{}|{}",
+            ask.provenance.source,
+            ask.provenance.native_id,
+            thread.item.key,
+            shas.join(",")
+        );
+
         let draft = backend.draft(&req)?;
         let proposal = ActionProposal::new(kind, target, draft, evidence.clone(), backend.backend_id())?
-            .with_rationale(rationale);
+            .with_rationale(rationale)
+            .with_correlation_key(correlation_key);
         proposals.push(proposal);
     }
     Ok(proposals)
+}
+
+/// Outcome of an idempotent queueing pass.
+#[derive(Debug, Clone, Default)]
+pub struct QueueOutcome {
+    pub queued: usize,
+    /// Skipped as duplicates (an equivalent proposal already exists open/decided).
+    pub skipped: usize,
+    pub ids: Vec<i64>,
+}
+
+/// Queue proposals for the given threads IDEMPOTENTLY (Phase 2.3): a proposal
+/// whose (ask, work item, evidence) key already exists in a decided-or-open
+/// state is skipped, so repeated correlation/re-plan runs never duplicate and a
+/// rejected proposal is never resurrected. Only *Full* threads produce proposals.
+pub fn queue_proposals(
+    conn: &mut Connection,
+    threads: &[WorkThread],
+    backend: &dyn DraftingBackend,
+    actor: &str,
+    ttl: chrono::Duration,
+) -> Result<QueueOutcome> {
+    let mut outcome = QueueOutcome::default();
+    for thread in threads {
+        for proposal in propose_from_thread(thread, backend)? {
+            if let Some(key) = proposal.correlation_key() {
+                if crate::act::correlation_key_blocking(conn, key)? {
+                    outcome.skipped += 1;
+                    continue;
+                }
+            }
+            let id = crate::act::insert_proposal(conn, &proposal, actor, ttl)?;
+            outcome.ids.push(id);
+            outcome.queued += 1;
+        }
+    }
+    Ok(outcome)
 }
 
 // -------------------------------------------------------- db loaders -------
@@ -456,7 +509,7 @@ pub fn load_asks(conn: &Connection) -> Result<Vec<AskInput>> {
         let source = SourceId::parse(&source)
             .with_context(|| format!("unknown ask source '{source}'"))?;
         let raw: Value = serde_json::from_str(&raw_json)?;
-        let (subject, text) = ask_text(source, &raw);
+        let (subject, text, asker) = ask_text(source, &raw);
         // Precision gate: only messages that reference a work item are asks.
         if issue_keys(&text).is_empty() {
             continue;
@@ -465,30 +518,34 @@ pub fn load_asks(conn: &Connection) -> Result<Vec<AskInput>> {
             provenance: ProvenanceRef { source, native_id, deep_link },
             subject,
             text,
+            asker,
             occurred_at: parse_utc(&occurred_at)?,
         });
     }
     Ok(out)
 }
 
-/// (subject, key-scan text) for an ask from its stored raw payload.
-fn ask_text(source: SourceId, raw: &Value) -> (Option<String>, String) {
+/// (subject, key-scan text, asker) for an ask from its stored raw payload.
+fn ask_text(source: SourceId, raw: &Value) -> (Option<String>, String, Option<String>) {
     match source {
         SourceId::Gmail => {
             let payload = raw.get("payload").cloned().unwrap_or(Value::Null);
-            let subject = crate::adapters::gmail::header_values(&payload, "Subject")
-                .first()
-                .map(|s| s.to_string())
-                .unwrap_or_default();
+            let header = |name: &str| {
+                crate::adapters::gmail::header_values(&payload, name)
+                    .first()
+                    .map(|s| s.to_string())
+            };
+            let subject = header("Subject").unwrap_or_default();
             let snippet = raw.get("snippet").and_then(Value::as_str).unwrap_or("");
             let text = format!("{subject}\n{snippet}");
-            (Some(subject), text)
+            (Some(subject), text, header("From"))
         }
         SourceId::Slack => {
             let text = raw.get("text").and_then(Value::as_str).unwrap_or("").to_string();
-            (None, text)
+            let asker = raw.get("user").and_then(Value::as_str).map(String::from);
+            (None, text, asker)
         }
-        _ => (None, String::new()),
+        _ => (None, String::new(), None),
     }
 }
 
@@ -572,6 +629,7 @@ mod tests {
             },
             subject: Some("Status?".to_string()),
             text: text.to_string(),
+            asker: None,
             occurred_at: Utc::now(),
         }
     }

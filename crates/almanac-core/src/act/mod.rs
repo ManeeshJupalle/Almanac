@@ -267,6 +267,10 @@ pub struct ActionProposal {
     /// this proposal (Phase 2.2). `None` for dev-seeded proposals. Shown in the
     /// approval UI so the confidence/basis is visible before approval.
     correlation_rationale: Option<String>,
+    /// Idempotency key (Phase 2.3): the (ask, work item, evidence) triple. A
+    /// re-plan cycle skips queueing a proposal whose key already exists in a
+    /// decided-or-open state, so repeated correlation runs never duplicate.
+    correlation_key: Option<String>,
 }
 
 impl ActionProposal {
@@ -382,6 +386,7 @@ impl ActionProposal {
             evidence,
             backend_id: backend_id.to_string(),
             correlation_rationale: None,
+            correlation_key: None,
         })
     }
 
@@ -390,6 +395,16 @@ impl ActionProposal {
     pub fn with_rationale(mut self, rationale: impl Into<String>) -> Self {
         self.correlation_rationale = Some(rationale.into());
         self
+    }
+
+    /// Attach the idempotency key (the correlation Proposer sets this).
+    pub fn with_correlation_key(mut self, key: impl Into<String>) -> Self {
+        self.correlation_key = Some(key.into());
+        self
+    }
+
+    pub fn correlation_key(&self) -> Option<&str> {
+        self.correlation_key.as_deref()
     }
 
     pub fn kind(&self) -> ActionKind {
@@ -493,8 +508,8 @@ pub fn insert_proposal(
              (kind, state, target_source, target_native_id, target_channel,
               target_transition_id, target_transition_name,
               draft_subject, draft_body, asserts_work_done, backend_id, expires_at,
-              correlation_rationale)
-         VALUES (?1, 'proposed', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              correlation_rationale, correlation_key)
+         VALUES (?1, 'proposed', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         (
             proposal.kind().as_str(),
             target_source,
@@ -508,6 +523,7 @@ pub fn insert_proposal(
             &proposal.backend_id,
             &expires_at,
             proposal.correlation_rationale(),
+            proposal.correlation_key(),
         ),
     )
     .context("persisting proposal (an FK failure here means the reply/issue target is not a stored source object)")?;
@@ -849,6 +865,40 @@ pub(crate) fn finalize_execution(
     ensure!(n == 1, "cannot finalize execution of proposal {id}: not in state 'approved'");
     let seq =
         audit::append(&tx, "executor", event, Some(id), &audit::sha256_hex(&payload))?;
+    tx.commit()?;
+    Ok(seq)
+}
+
+// ------------------------------------------------ idempotency (2.3) -------
+
+/// States in which an existing proposal BLOCKS re-queueing the same correlation
+/// (its `correlation_key`). Expired is deliberately absent — a lapsed proposal
+/// may be re-surfaced by a later re-plan; `rejected` is present so a human's
+/// rejection is never resurrected.
+const BLOCKING_STATES: &str = "'proposed', 'approved', 'executed', 'execution_failed', 'rejected'";
+
+/// True if a proposal with this correlation key already exists in a
+/// decided-or-open state (Phase 2.3 idempotency). Re-planning uses this to
+/// avoid duplicating a proposal it (or the user) already acted on.
+pub fn correlation_key_blocking(conn: &Connection, correlation_key: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        &format!(
+            "SELECT COUNT(*) FROM action_proposals
+             WHERE correlation_key = ?1 AND state IN ({BLOCKING_STATES})"
+        ),
+        [correlation_key],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Audit a re-plan cycle (Phase 2.3): a traceable, actor-attributed record that
+/// the plan was regenerated — no silent background mutation. `summary` names the
+/// reason and outcome; its hash is chained (the same discipline as every other
+/// audited action). Not tied to a single proposal (`proposal_id` is NULL).
+pub fn record_replan(conn: &mut Connection, actor: &str, summary: &str) -> Result<i64> {
+    let tx = conn.transaction()?;
+    let seq = audit::append(&tx, actor, "replanned", None, &audit::sha256_hex(summary.as_bytes()))?;
     tx.commit()?;
     Ok(seq)
 }

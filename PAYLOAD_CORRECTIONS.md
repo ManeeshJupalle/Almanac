@@ -277,3 +277,39 @@ git -C <repo> log <ref> -z --no-color \
 - **J15 applied.** The engine takes the `/myself` accountId and drops Almanac's
   own comments from the explicit-link signal, so it never corroborates its own
   prior output. Offline-testable: the accountId is a parameter, not a live call.
+
+# Prioritization & re-planning (Phase 2.3)
+
+No new external API — nothing to fixture. The scoring model runs on synthetic DB
+states / in-memory candidates (the ranking tests). Design decisions recorded
+here for the same reason the corrections are: so reality is documented, not
+assumed.
+
+- **Two relevance systems, combined (not re-gated).** Candidates come from BOTH
+  the correlation engine (work threads: ask ↔ Jira issue ↔ commit — evidence &
+  completeness signal) AND the v1 classifier (non-noise extracted items not
+  already a thread's ask — the classifier-kind signal). They add in the score.
+  Correlation is NOT re-gated on the classifier label — that is exactly the
+  regression the 2.2 live gate caught (`load_asks`), and re-introducing it here
+  would re-hide the ALM-3 email.
+- **Deterministic scoring (factors → weights).** actionability (thread-full 50 /
+  partial 20 / ask 25 / event 10) · deadline (imminent≤4h 40 / today 30 / ≤3d 15
+  / later 5) · hard evidence 15 · classifier (action-needed 10 / commitment 8) ·
+  staleness +1/day capped 15 · priority-asker 20 (`ALMANAC_PRIORITY_SENDERS`).
+  Sections: do-now (imminent deadline OR score≥65) / by-EOD (today OR ≥40) /
+  can-wait. **Tie-break (total, stable):** score desc → earlier deadline → older
+  occurred_at → key. Same inputs → same order; adding one item never reshuffles
+  the rest (each sort key depends only on that item). The model never orders —
+  no synthesized prose, no model-generated ranking (v1 discipline; this is
+  stricter than BUILD_PHASES_V2's "model may break ties").
+- **Idempotency key = (ask, work item, evidence).** `source:native_id | issue_key
+  | sorted(commit shas)`, stored on the proposal. A re-plan skips re-queueing a
+  key already present in a decided-or-open state (proposed/approved/executed/
+  execution_failed/rejected) — no duplicates, and a **rejected proposal is never
+  resurrected**. EXPIRED does not block (it lapsed undecided → may return).
+- **Trigger model = explicit + audited.** `prioritize`/`get_plan` are pure reads
+  (the app's passive view). `replan` (CLI `replan`, UI "Refresh plan" button) is
+  the triggered cycle: idempotent queueing + re-rank + a `replanned` audit record
+  (actor + reason), so there is **no silent background mutation**. Every triggered
+  cycle is chained; the audit chain still verifies across cycles. (A poll can wrap
+  `replan`; keep it coarse so the chain stays meaningful.)

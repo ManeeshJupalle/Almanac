@@ -1,0 +1,14 @@
+-- 0008_correlation_idempotency (Phase 2.3): make re-planning idempotent.
+--
+-- A correlation proposal's identity is the (ask, work item, evidence) triple:
+-- the reply-target message (source + native id), the Jira issue key, and the
+-- sorted commit shas cited as evidence. Storing that key lets a re-plan cycle
+-- SKIP re-queueing a proposal that already exists in a decided-or-open state
+-- (proposed / approved / executed / execution_failed / rejected) — so repeated
+-- `correlate` runs never duplicate, and a human's rejection is never resurrected
+-- by the next cycle. EXPIRED proposals do NOT block: they lapsed without a
+-- decision, so re-planning may legitimately re-surface the work.
+--
+-- Nullable — dev-seeded and pre-2.3 proposals carry no key. Plain ADD COLUMN
+-- (no CHECK change → no table rebuild). Shipped migrations are not edited.
+ALTER TABLE action_proposals ADD COLUMN correlation_key TEXT;

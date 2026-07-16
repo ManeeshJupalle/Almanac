@@ -340,6 +340,112 @@ fn verify_audit_chain() -> Result<String, String> {
     inner().map_err(|e| format!("{e:#}"))
 }
 
+// ---------------------------------------------- prioritized plan (2.3) -----
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FactorView {
+    pub name: String,
+    pub points: i32,
+    pub reason: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanItemView {
+    pub rank: usize,
+    pub title: String,
+    pub kind: String,
+    pub section: String,
+    pub score: i32,
+    /// Templated "why this rank" (typed factor slots only).
+    pub rationale: String,
+    pub deep_link: String,
+    pub factors: Vec<FactorView>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanView {
+    pub summary: String,
+    pub generated_at: String,
+    pub items: Vec<PlanItemView>,
+}
+
+fn candidate_kind_str(k: almanac_core::plan::CandidateKind) -> &'static str {
+    use almanac_core::plan::CandidateKind::*;
+    match k {
+        WorkThreadFull => "work thread (ready)",
+        WorkThreadPartial => "work thread (possible)",
+        CalendarEvent => "event",
+        Ask => "ask",
+    }
+}
+
+fn plan_to_view(p: almanac_core::plan::Plan) -> PlanView {
+    PlanView {
+        summary: p.summary,
+        generated_at: p.generated_at.to_rfc3339(),
+        items: p
+            .items
+            .into_iter()
+            .map(|i| PlanItemView {
+                rank: i.rank,
+                title: i.candidate.title,
+                kind: candidate_kind_str(i.candidate.kind).to_string(),
+                section: i.section.as_str().to_string(),
+                score: i.score,
+                rationale: i.rationale,
+                deep_link: i.candidate.deep_link,
+                factors: i
+                    .factors
+                    .into_iter()
+                    .map(|f| FactorView { name: f.name.to_string(), points: f.points, reason: f.reason })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+/// The current prioritized plan — READ ONLY (no queueing, no audit). The passive
+/// display the UI opens with.
+#[tauri::command]
+fn get_plan() -> Result<PlanView, String> {
+    let inner = || -> anyhow::Result<PlanView> {
+        let path = almanac_core::init_default_db()?;
+        let conn = almanac_core::db::open(&path)?;
+        let now = chrono::Utc::now();
+        let candidates = almanac_core::plan::load_candidates(&conn, now)?;
+        let config = almanac_core::plan::PriorityConfig::from_env();
+        Ok(plan_to_view(almanac_core::plan::prioritize(&candidates, &config, now)))
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
+/// A triggered re-plan cycle (the "Refresh plan" button): idempotently queue
+/// proposals + re-rank + append a traceable audit record (actor = the human who
+/// clicked). Offline (no external writes; J15 handled at correlate time and by
+/// the idempotency key).
+#[tauri::command]
+fn replan(reason: Option<String>) -> Result<PlanView, String> {
+    let inner = || -> anyhow::Result<PlanView> {
+        let path = almanac_core::init_default_db()?;
+        let mut conn = almanac_core::db::open(&path)?;
+        let config = almanac_core::plan::PriorityConfig::from_env();
+        let reason = reason.unwrap_or_else(|| "manual refresh".to_string());
+        let report = almanac_core::plan::replan_cycle(
+            &mut conn,
+            &config,
+            None,
+            "user",
+            &reason,
+            chrono::Utc::now(),
+        )?;
+        Ok(plan_to_view(report.plan))
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // .env lives at the repo root; tauri dev runs with cwd=src-tauri and a
@@ -381,7 +487,9 @@ pub fn run() {
             approve_proposal,
             reject_proposal,
             execute_proposal,
-            verify_audit_chain
+            verify_audit_chain,
+            get_plan,
+            replan
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
