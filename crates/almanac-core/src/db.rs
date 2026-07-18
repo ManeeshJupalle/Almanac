@@ -56,6 +56,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "correlation_idempotency",
         sql: include_str!("../migrations/0008_correlation_idempotency.sql"),
     },
+    Migration {
+        version: 9,
+        name: "app_meta",
+        sql: include_str!("../migrations/0009_app_meta.sql"),
+    },
 ];
 
 /// Open the database at `path`, creating parent directories and the file on
@@ -475,6 +480,28 @@ pub fn applied_versions(conn: &Connection) -> Result<Vec<i64>> {
     Ok(versions)
 }
 
+/// Upsert a small local key/value fact (see migration 0009 `app_meta`).
+pub fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO app_meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )?;
+    Ok(())
+}
+
+/// Read a local key/value fact; `None` if unset.
+pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let value = conn
+        .query_row("SELECT value FROM app_meta WHERE key = ?1", [key], |r| r.get(0))
+        .optional()?;
+    Ok(value)
+}
+
+/// The `app_meta` key under which the Jira `/myself` accountId is cached so the
+/// offline UI re-plan can apply J15 self-comment exclusion.
+pub const JIRA_SELF_ACCOUNT_ID: &str = "jira_self_account_id";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,6 +555,7 @@ mod tests {
             tables,
             vec![
                 "action_proposals".to_string(),
+                "app_meta".to_string(),
                 "audit_records".to_string(),
                 "briefing_items".to_string(),
                 "briefings".to_string(),

@@ -11,7 +11,8 @@
         { "url": "https://mail.google.com/**" },
         { "url": "https://www.google.com/calendar/**" },
         { "url": "https://calendar.google.com/**" },
-        { "url": "https://*.slack.com/**" }
+        { "url": "https://*.slack.com/**" },
+        { "url": "https://*.atlassian.net/**" }
       ]
     }
   ]

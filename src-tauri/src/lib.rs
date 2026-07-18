@@ -424,19 +424,21 @@ fn get_plan() -> Result<PlanView, String> {
 
 /// A triggered re-plan cycle (the "Refresh plan" button): idempotently queue
 /// proposals + re-rank + append a traceable audit record (actor = the human who
-/// clicked). Offline (no external writes; J15 handled at correlate time and by
-/// the idempotency key).
+/// clicked). Offline (no external writes). J15 self-comment exclusion uses the
+/// accountId cached by the last online Jira step (`app_meta`); if none has been
+/// cached yet, it degrades to no exclusion — same as before that step ran.
 #[tauri::command]
 fn replan(reason: Option<String>) -> Result<PlanView, String> {
     let inner = || -> anyhow::Result<PlanView> {
         let path = almanac_core::init_default_db()?;
         let mut conn = almanac_core::db::open(&path)?;
+        let self_id = almanac_core::db::get_meta(&conn, almanac_core::db::JIRA_SELF_ACCOUNT_ID)?;
         let config = almanac_core::plan::PriorityConfig::from_env();
         let reason = reason.unwrap_or_else(|| "manual refresh".to_string());
         let report = almanac_core::plan::replan_cycle(
             &mut conn,
             &config,
-            None,
+            self_id,
             "user",
             &reason,
             chrono::Utc::now(),

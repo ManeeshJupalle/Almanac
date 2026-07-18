@@ -81,9 +81,12 @@ pub struct Candidate {
     pub classifier_kind: Option<ItemKind>,
     /// Event start / due time (drives the deadline factor); None for plain asks.
     pub deadline: Option<DateTime<Utc>>,
-    /// When the underlying ask/event occurred (staleness + tie-break).
+    /// When the underlying ask/event occurred (staleness + tie-break). For a
+    /// multi-ask thread this is the OLDEST ask — the one waiting longest.
     pub occurred_at: DateTime<Utc>,
-    pub asker: Option<String>,
+    /// Every asker on the candidate (a thread may bind several asks). The
+    /// asker-weight fires if ANY of them is a configured priority sender.
+    pub askers: Vec<String>,
     pub deep_link: String,
 }
 
@@ -270,14 +273,12 @@ fn score_candidate(c: &Candidate, config: &PriorityConfig, now: DateTime<Utc>) -
         }
     }
 
-    if let Some(asker) = &c.asker {
-        if config.is_important(asker) {
-            factors.push(Factor {
-                name: "asker",
-                points: W_ASKER,
-                reason: "from a priority sender".into(),
-            });
-        }
+    if c.askers.iter().any(|a| config.is_important(a)) {
+        factors.push(Factor {
+            name: "asker",
+            points: W_ASKER,
+            reason: "from a priority sender".into(),
+        });
     }
 
     let score = factors.iter().map(|f| f.points).sum();
@@ -341,10 +342,15 @@ pub fn build_candidates(
         } else {
             CandidateKind::WorkThreadPartial
         };
-        let (asker, occurred_at) = match t.asks.first() {
-            Some(a) => (a.asker.clone(), a.occurred_at),
-            None => (None, t.item.occurred_at),
-        };
+        // Aggregate across ALL bound asks: any asker can trip the priority-sender
+        // weight, and staleness is measured from the OLDEST ask (waiting longest).
+        let askers: Vec<String> = t.asks.iter().filter_map(|a| a.asker.clone()).collect();
+        let occurred_at = t
+            .asks
+            .iter()
+            .map(|a| a.occurred_at)
+            .min()
+            .unwrap_or(t.item.occurred_at);
         for a in &t.asks {
             thread_ask_ids.insert((a.provenance.source.to_string(), a.provenance.native_id.clone()));
         }
@@ -356,7 +362,7 @@ pub fn build_candidates(
             classifier_kind: None,
             deadline: None,
             occurred_at,
-            asker,
+            askers,
             deep_link: t.item.deep_link.clone(),
         });
     }
@@ -399,7 +405,7 @@ pub fn build_candidates(
         } else {
             (CandidateKind::Ask, None)
         };
-        let asker = asker_of(src, &raw_json);
+        let askers = asker_of(src, &raw_json).into_iter().collect();
         candidates.push(Candidate {
             key: format!("{source}:{native_id}"),
             title: summary,
@@ -408,7 +414,7 @@ pub fn build_candidates(
             classifier_kind: Some(item_kind),
             deadline,
             occurred_at: occ,
-            asker,
+            askers,
             deep_link,
         });
     }
@@ -416,12 +422,15 @@ pub fn build_candidates(
 }
 
 /// Read-only plan view: correlate, then rank. No queueing, no audit (the app's
-/// passive display uses this; `replan_cycle` is the explicit refresh).
+/// passive display uses this; `replan_cycle` is the explicit refresh). J15
+/// self-comment exclusion uses the accountId cached by the last online Jira step
+/// so the displayed correlation matches what a re-plan would queue.
 pub fn load_candidates(conn: &Connection, now: DateTime<Utc>) -> Result<Vec<Candidate>> {
     let asks = correlate::load_asks(conn)?;
     let items = correlate::load_work_items(conn)?;
     let commits = correlate::load_commits(conn)?;
-    let threads = CorrelationEngine::new(None).correlate(&asks, &items, &commits);
+    let self_id = crate::db::get_meta(conn, crate::db::JIRA_SELF_ACCOUNT_ID)?;
+    let threads = CorrelationEngine::new(self_id).correlate(&asks, &items, &commits);
     build_candidates(conn, &threads, now)
 }
 
@@ -511,7 +520,7 @@ mod tests {
             occurred_at: DateTime::parse_from_rfc3339("2026-07-16T09:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            asker: None,
+            askers: vec![],
             deep_link: "https://example.com/x".into(),
         }
     }
@@ -576,7 +585,8 @@ mod tests {
     fn asker_weight_promotes_priority_sender() {
         let cfg = PriorityConfig { important_senders: vec!["boss@corp.com".into()] };
         let mut vip = base("vip", CandidateKind::Ask);
-        vip.asker = Some("Big Boss <boss@corp.com>".into());
+        // Priority sender is the SECOND asker — the fix must scan all of them.
+        vip.askers = vec!["someone@corp.com".into(), "Big Boss <boss@corp.com>".into()];
         let plain = base("plain", CandidateKind::Ask); // same kind, no asker weight
         let plan = prioritize(&[plain, vip], &cfg, now());
         assert_eq!(plan.items[0].candidate.key, "vip");

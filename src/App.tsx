@@ -136,7 +136,9 @@ function App() {
       const [status, stored, thePlan] = await Promise.all([
         invoke<SourceStatus[]>("get_connection_status"),
         invoke<Briefing | null>("get_briefing"),
-        invoke<Plan>("get_plan"),
+        // The plan is a secondary panel: a failure here must not blank out the
+        // connection status and briefing, so it settles to null on its own.
+        invoke<Plan>("get_plan").catch(() => null),
       ]);
       setStatuses(status);
       setBriefing(stored);
@@ -216,7 +218,8 @@ function App() {
         (url.hostname === "mail.google.com" ||
           url.hostname === "www.google.com" ||
           url.hostname === "calendar.google.com" ||
-          url.hostname.endsWith(".slack.com"));
+          url.hostname.endsWith(".slack.com") ||
+          url.hostname.endsWith(".atlassian.net"));
       if (!hostAllowed) {
         setError(`Refused to open an unexpected link: ${item.deepLink}`);
         return;

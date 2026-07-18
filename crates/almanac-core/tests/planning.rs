@@ -156,6 +156,26 @@ fn expired_proposal_may_be_requeued() {
     assert_eq!(proposal_count(&conn), 2);
 }
 
+#[test]
+fn new_commit_on_same_ask_issue_does_not_duplicate() {
+    let (_d, mut conn) = test_db();
+    seed_full_triple(&conn); // ALM-3 email + issue + commit a1…
+
+    let first = queue(&mut conn);
+    assert_eq!(first.queued, 1);
+    assert_eq!(proposal_count(&conn), 1);
+
+    // A NEW commit also references ALM-3 — more Tier-Hard evidence for the SAME
+    // (ask, issue). The identity is the ask+issue pair, so this must not mint a
+    // second, duplicate-looking proposal.
+    store_git_commit(&conn, "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3", "ALM-3: follow-up");
+
+    let second = queue(&mut conn);
+    assert_eq!(second.queued, 0, "extra evidence must not duplicate the proposal");
+    assert_eq!(second.skipped, 1);
+    assert_eq!(proposal_count(&conn), 1, "still one proposal for the ask+issue");
+}
+
 // ----------------------------------------------------- re-plan + audit -----
 
 #[test]
@@ -265,4 +285,55 @@ fn gmail_event_notification_is_not_a_calendar_deadline() {
 fn audit_events(conn: &Connection) -> Vec<String> {
     let mut stmt = conn.prepare("SELECT event FROM audit_records ORDER BY seq ASC").unwrap();
     stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
+/// A Jira issue whose only link to a commit is one comment (author + sha ref),
+/// so J15 self-exclusion decides whether that commit becomes evidence.
+fn store_jira_issue_with_comment(conn: &Connection, key: &str, author_acct: &str, sha_ref: &str) {
+    let obj = SourceObject {
+        provenance: ProvenanceRef {
+            source: SourceId::Jira,
+            native_id: key.to_string(),
+            deep_link: format!("https://x.atlassian.net/browse/{key}"),
+        },
+        raw: RawContent::new(json!({
+            "key": key,
+            "fields": {
+                "summary": "Comment-linked issue",
+                "comment": { "comments": [ {
+                    "author": { "accountId": author_acct },
+                    "body": { "type": "doc", "content": [ {
+                        "type": "paragraph",
+                        "content": [ { "type": "text", "text": format!("done in {sha_ref} ") } ]
+                    } ] }
+                } ] }
+            }
+        })),
+        occurred_at: Utc::now() - Duration::hours(3),
+    };
+    almanac_core::db::insert_source_object(conn, &obj).unwrap();
+}
+
+/// The J15 fix (#2): the accountId cached in `app_meta` by an online Jira step
+/// must make the OFFLINE plan path exclude Almanac's own Jira comment, so its
+/// own comment never binds a commit as "evidence".
+#[test]
+fn cached_self_account_id_excludes_self_comment_evidence() {
+    let (_d, conn) = test_db();
+    // Commit whose ONLY tie to ALM-7 is a Jira comment (keyless subject/body/branch).
+    store_git_commit(&conn, "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4", "chore: tidy up");
+    store_jira_issue_with_comment(&conn, "ALM-7", "self-acct", "d4d4d4d");
+    store_gmail_ask(&conn, "m-alm7", "ALM-7");
+
+    // No cached self id → the (self-authored) comment binds the commit → Full.
+    let c1 = plan::load_candidates(&conn, Utc::now()).unwrap();
+    let t1 = c1.iter().find(|c| c.key == "thread:ALM-7").unwrap();
+    assert!(t1.has_hard_evidence, "without J15 the self-comment binds evidence");
+
+    // Cache the self accountId (what an online correlate/replan persists) →
+    // J15 excludes Almanac's own comment → the commit is no longer evidence.
+    almanac_core::db::set_meta(&conn, almanac_core::db::JIRA_SELF_ACCOUNT_ID, "self-acct").unwrap();
+    let c2 = plan::load_candidates(&conn, Utc::now()).unwrap();
+    let t2 = c2.iter().find(|c| c.key == "thread:ALM-7").unwrap();
+    assert!(!t2.has_hard_evidence, "the cached self id excludes Almanac's own comment");
 }

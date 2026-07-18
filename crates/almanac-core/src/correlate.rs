@@ -334,17 +334,15 @@ pub fn propose_from_thread(
             sites = sites,
         );
 
-        // Idempotency key (Phase 2.3): the (ask, work item, evidence) triple —
-        // the reply-target message, the issue key, and the sorted commit shas.
-        let mut shas: Vec<String> =
-            thread.evidence.iter().map(|ec| ec.commit.sha.clone()).collect();
-        shas.sort();
+        // Idempotency key (Phase 2.3): the (ask, work item) pair — the
+        // reply-target message and the issue key. One open proposal per
+        // ask+issue: a later commit that adds MORE evidence to the same thread
+        // must NOT mint a second, duplicate-looking proposal (the cited commit
+        // is already valid Tier-Hard evidence). The evidence set is deliberately
+        // NOT part of the identity.
         let correlation_key = format!(
-            "{}:{}|{}|{}",
-            ask.provenance.source,
-            ask.provenance.native_id,
-            thread.item.key,
-            shas.join(",")
+            "{}:{}|{}",
+            ask.provenance.source, ask.provenance.native_id, thread.item.key
         );
 
         let draft = backend.draft(&req)?;

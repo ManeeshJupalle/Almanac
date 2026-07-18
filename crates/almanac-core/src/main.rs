@@ -555,6 +555,8 @@ async fn correlate_cmd() -> Result<()> {
     let self_id = match almanac_core::auth::JiraAuth::from_env() {
         Ok(auth) => match almanac_core::adapters::jira::fetch_self_account_id(&auth).await {
             Ok(id) => {
+                // Cache it so the OFFLINE UI re-plan applies the same J15 exclusion.
+                let _ = almanac_core::db::set_meta(&conn, almanac_core::db::JIRA_SELF_ACCOUNT_ID, &id);
                 println!("self accountId resolved for J15 comment exclusion");
                 Some(id)
             }
@@ -619,10 +621,19 @@ async fn replan_cmd(reason: Option<String>) -> Result<()> {
     let reason = reason.unwrap_or_else(|| "manual refresh".to_string());
     let mut conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
 
-    // J15 self-exclusion (best-effort, like correlate).
-    let self_id = match almanac_core::auth::JiraAuth::from_env() {
+    // J15 self-exclusion: resolve online and cache it; if offline, fall back to
+    // the last cached accountId so the exclusion still holds.
+    let key = almanac_core::db::JIRA_SELF_ACCOUNT_ID;
+    let online_id = match almanac_core::auth::JiraAuth::from_env() {
         Ok(auth) => almanac_core::adapters::jira::fetch_self_account_id(&auth).await.ok(),
         Err(_) => None,
+    };
+    let self_id = match online_id {
+        Some(id) => {
+            let _ = almanac_core::db::set_meta(&conn, key, &id);
+            Some(id)
+        }
+        None => almanac_core::db::get_meta(&conn, key)?,
     };
     let config = almanac_core::plan::PriorityConfig::from_env();
     let report = almanac_core::plan::replan_cycle(
