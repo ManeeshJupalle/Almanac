@@ -1,5 +1,6 @@
 # Local-only docs (kept on disk, not published to the repo)
 BUILD_PHASES.md
+BUILD_PHASES_V2.md
 AUDIT.md
 
 # Rust
