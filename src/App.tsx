@@ -62,6 +62,8 @@ type Proposal = {
 
 type Factor = { name: string; points: number; reason: string };
 
+type ProposalRef = { id: number; kind: string; state: string };
+
 type PlanItem = {
   rank: number;
   title: string;
@@ -71,6 +73,7 @@ type PlanItem = {
   rationale: string;
   deepLink: string;
   factors: Factor[];
+  proposals: ProposalRef[];
 };
 
 type Plan = {
@@ -131,6 +134,16 @@ function App() {
     }
   }, []);
 
+  // Read-only plan refresh (no queueing, no audit) so linked-proposal chips stay
+  // in sync after a decision made from either panel. Secondary — ignore failure.
+  const loadPlan = useCallback(async () => {
+    try {
+      setPlan(await invoke<Plan>("get_plan"));
+    } catch {
+      /* plan is a secondary panel; its refresh failure must not surface */
+    }
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
       const [status, stored, thePlan] = await Promise.all([
@@ -180,14 +193,16 @@ function App() {
               : "execute_proposal";
         await invoke<string>(cmd, { id });
         await loadProposals();
+        await loadPlan();
       } catch (e) {
         setError(String(e));
         await loadProposals();
+        await loadPlan();
       } finally {
         setBusyId(null);
       }
     },
-    [loadProposals],
+    [loadProposals, loadPlan],
   );
 
   useEffect(() => {
@@ -457,6 +472,54 @@ function App() {
                             </span>
                           ))}
                         </div>
+                        {i.proposals.length > 0 && (
+                          <div
+                            className="plan-proposals"
+                            aria-label="Queued proposals"
+                          >
+                            {i.proposals.map((p) => (
+                              <div key={p.id} className="plan-proposal">
+                                <span
+                                  className={`proposal-state chip state-chip-${p.state}`}
+                                >
+                                  {PROPOSAL_KIND_LABEL[
+                                    p.kind as Proposal["kind"]
+                                  ] ?? p.kind}{" "}
+                                  · {p.state.replace("_", " ")}
+                                </span>
+                                {/* Same A1 approve/execute path as the queue —
+                                    no second execution route. */}
+                                {p.state === "proposed" && (
+                                  <>
+                                    <button
+                                      className="approve"
+                                      disabled={busyId === p.id}
+                                      onClick={() => decide(p.id, "approve")}
+                                    >
+                                      Approve
+                                    </button>
+                                    <button
+                                      className="reject"
+                                      disabled={busyId === p.id}
+                                      onClick={() => decide(p.id, "reject")}
+                                    >
+                                      Reject
+                                    </button>
+                                  </>
+                                )}
+                                {p.state === "approved" && (
+                                  <button
+                                    className="execute"
+                                    disabled={busyId === p.id}
+                                    onClick={() => decide(p.id, "execute")}
+                                  >
+                                    {busyId === p.id ? "Sending…" : "Send now"}
+                                  </button>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </li>
                     ))}
                   </ul>

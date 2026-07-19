@@ -20,7 +20,7 @@
 //! it idempotently queues proposals (no duplicates, no resurrected rejections)
 //! and appends a traceable audit record (actor + reason) — no silent mutation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -87,6 +87,10 @@ pub struct Candidate {
     /// Every asker on the candidate (a thread may bind several asks). The
     /// asker-weight fires if ANY of them is a configured priority sender.
     pub askers: Vec<String>,
+    /// Correlation identities for this item's asks (Phase 3.1) — used to LINK a
+    /// thread item to its queued proposal(s). Empty for non-thread candidates
+    /// (only Full threads produce proposals).
+    pub correlation_keys: Vec<String>,
     pub deep_link: String,
 }
 
@@ -351,6 +355,12 @@ pub fn build_candidates(
             .map(|a| a.occurred_at)
             .min()
             .unwrap_or(t.item.occurred_at);
+        // The same identity the proposer stores, so a queued proposal links back.
+        let correlation_keys: Vec<String> = t
+            .asks
+            .iter()
+            .map(|a| correlate::correlation_key(a.provenance.source, &a.provenance.native_id, &t.item.key))
+            .collect();
         for a in &t.asks {
             thread_ask_ids.insert((a.provenance.source.to_string(), a.provenance.native_id.clone()));
         }
@@ -363,6 +373,7 @@ pub fn build_candidates(
             deadline: None,
             occurred_at,
             askers,
+            correlation_keys,
             deep_link: t.item.deep_link.clone(),
         });
     }
@@ -415,6 +426,7 @@ pub fn build_candidates(
             deadline,
             occurred_at: occ,
             askers,
+            correlation_keys: Vec::new(),
             deep_link,
         });
     }
@@ -432,6 +444,42 @@ pub fn load_candidates(conn: &Connection, now: DateTime<Utc>) -> Result<Vec<Cand
     let self_id = crate::db::get_meta(conn, crate::db::JIRA_SELF_ACCOUNT_ID)?;
     let threads = CorrelationEngine::new(self_id).correlate(&asks, &items, &commits);
     build_candidates(conn, &threads, now)
+}
+
+/// One queued proposal linked to a plan item (Phase 3.1).
+#[derive(Debug, Clone)]
+pub struct LinkedProposal {
+    pub id: i64,
+    pub kind: String,
+    pub state: crate::act::ProposalState,
+}
+
+/// Link each plan item to the proposal(s) queued for it, through the shared
+/// correlation identity. Read-only. Keyed by `RankedItem.candidate.key`; items
+/// with no queued proposal are simply absent from the map. A thread with several
+/// asks (or an expired-then-requeued key) can map to more than one proposal.
+pub fn link_proposals(
+    conn: &Connection,
+    plan: &Plan,
+) -> Result<HashMap<PlanKey, Vec<LinkedProposal>>> {
+    let links = crate::act::correlation_links(conn)?;
+    let mut by_ck: HashMap<&str, Vec<&crate::act::CorrelationLink>> = HashMap::new();
+    for l in &links {
+        by_ck.entry(l.correlation_key.as_str()).or_default().push(l);
+    }
+    let mut out: HashMap<PlanKey, Vec<LinkedProposal>> = HashMap::new();
+    for item in &plan.items {
+        let mut found = Vec::new();
+        for ck in &item.candidate.correlation_keys {
+            for l in by_ck.get(ck.as_str()).into_iter().flatten() {
+                found.push(LinkedProposal { id: l.id, kind: l.kind.clone(), state: l.state });
+            }
+        }
+        if !found.is_empty() {
+            out.insert(item.candidate.key.clone(), found);
+        }
+    }
+    Ok(out)
 }
 
 fn asker_of(source: SourceId, raw_json: &str) -> Option<String> {
@@ -521,6 +569,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             askers: vec![],
+            correlation_keys: vec![],
             deep_link: "https://example.com/x".into(),
         }
     }

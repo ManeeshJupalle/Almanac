@@ -715,6 +715,22 @@ body {
   cursor: help;
 }
 
+/* Phase 3.1: a plan item's linked proposal(s) + inline approve/execute. */
+.plan-proposals {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  padding-top: 0.45rem;
+  border-top: 1px dashed var(--rule);
+}
+.plan-proposal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 .evidence {
   display: flex;
   flex-wrap: wrap;

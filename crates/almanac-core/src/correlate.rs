@@ -247,6 +247,14 @@ fn comment_references_commit(comment_text: &str, commit: &CommitInput) -> bool {
 
 // ----------------------------------------------------------- proposer ------
 
+/// The identity of a correlation proposal: the (ask, work item) pair — the
+/// reply-target message and the issue key. Shared by the proposer (which STORES
+/// it as `correlation_key`) and the plan loader (which LOOKS IT UP to link a
+/// plan item to its queued proposal), so the two can never drift apart.
+pub fn correlation_key(ask_source: SourceId, ask_native_id: &str, issue_key: &str) -> String {
+    format!("{ask_source}:{ask_native_id}|{issue_key}")
+}
+
 /// Turn a resolved WorkThread into proposals through the Phase 2.0 machinery.
 /// Only *Full* threads propose; each bound ask yields one reply/post asserting
 /// the work is done, citing every bound commit (Tier-Hard) + the Jira issue as
@@ -334,16 +342,13 @@ pub fn propose_from_thread(
             sites = sites,
         );
 
-        // Idempotency key (Phase 2.3): the (ask, work item) pair — the
-        // reply-target message and the issue key. One open proposal per
-        // ask+issue: a later commit that adds MORE evidence to the same thread
-        // must NOT mint a second, duplicate-looking proposal (the cited commit
-        // is already valid Tier-Hard evidence). The evidence set is deliberately
-        // NOT part of the identity.
-        let correlation_key = format!(
-            "{}:{}|{}",
-            ask.provenance.source, ask.provenance.native_id, thread.item.key
-        );
+        // Idempotency + linking key (Phase 2.3): the (ask, work item) pair. One
+        // open proposal per ask+issue — a later commit that adds MORE evidence to
+        // the same thread must NOT mint a second, duplicate-looking proposal (the
+        // cited commit is already valid Tier-Hard evidence). Evidence is
+        // deliberately NOT part of the identity.
+        let correlation_key =
+            correlation_key(ask.provenance.source, &ask.provenance.native_id, &thread.item.key);
 
         let draft = backend.draft(&req)?;
         let proposal = ActionProposal::new(kind, target, draft, evidence.clone(), backend.backend_id())?

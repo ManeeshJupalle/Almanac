@@ -350,6 +350,16 @@ pub struct FactorView {
     pub reason: String,
 }
 
+/// A proposal queued for a plan item (Phase 3.1) — lets the plan surface + act on
+/// it inline, through the same approve/reject/execute commands as the queue.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposalRefView {
+    pub id: i64,
+    pub kind: String,
+    pub state: String,
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanItemView {
@@ -362,6 +372,8 @@ pub struct PlanItemView {
     pub rationale: String,
     pub deep_link: String,
     pub factors: Vec<FactorView>,
+    /// Proposal(s) queued for this item, if any (Phase 3.1).
+    pub proposals: Vec<ProposalRefView>,
 }
 
 #[derive(Serialize, Clone)]
@@ -382,26 +394,44 @@ fn candidate_kind_str(k: almanac_core::plan::CandidateKind) -> &'static str {
     }
 }
 
-fn plan_to_view(p: almanac_core::plan::Plan) -> PlanView {
+fn plan_to_view(
+    p: almanac_core::plan::Plan,
+    links: &std::collections::HashMap<String, Vec<almanac_core::plan::LinkedProposal>>,
+) -> PlanView {
     PlanView {
         summary: p.summary,
         generated_at: p.generated_at.to_rfc3339(),
         items: p
             .items
             .into_iter()
-            .map(|i| PlanItemView {
-                rank: i.rank,
-                title: i.candidate.title,
-                kind: candidate_kind_str(i.candidate.kind).to_string(),
-                section: i.section.as_str().to_string(),
-                score: i.score,
-                rationale: i.rationale,
-                deep_link: i.candidate.deep_link,
-                factors: i
-                    .factors
-                    .into_iter()
-                    .map(|f| FactorView { name: f.name.to_string(), points: f.points, reason: f.reason })
-                    .collect(),
+            .map(|i| {
+                let proposals = links
+                    .get(&i.candidate.key)
+                    .map(|ls| {
+                        ls.iter()
+                            .map(|l| ProposalRefView {
+                                id: l.id,
+                                kind: l.kind.clone(),
+                                state: l.state.as_str().to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                PlanItemView {
+                    rank: i.rank,
+                    title: i.candidate.title,
+                    kind: candidate_kind_str(i.candidate.kind).to_string(),
+                    section: i.section.as_str().to_string(),
+                    score: i.score,
+                    rationale: i.rationale,
+                    deep_link: i.candidate.deep_link,
+                    factors: i
+                        .factors
+                        .into_iter()
+                        .map(|f| FactorView { name: f.name.to_string(), points: f.points, reason: f.reason })
+                        .collect(),
+                    proposals,
+                }
             })
             .collect(),
     }
@@ -417,7 +447,9 @@ fn get_plan() -> Result<PlanView, String> {
         let now = chrono::Utc::now();
         let candidates = almanac_core::plan::load_candidates(&conn, now)?;
         let config = almanac_core::plan::PriorityConfig::from_env();
-        Ok(plan_to_view(almanac_core::plan::prioritize(&candidates, &config, now)))
+        let plan = almanac_core::plan::prioritize(&candidates, &config, now);
+        let links = almanac_core::plan::link_proposals(&conn, &plan)?;
+        Ok(plan_to_view(plan, &links))
     };
     inner().map_err(|e| format!("{e:#}"))
 }
@@ -443,7 +475,8 @@ fn replan(reason: Option<String>) -> Result<PlanView, String> {
             &reason,
             chrono::Utc::now(),
         )?;
-        Ok(plan_to_view(report.plan))
+        let links = almanac_core::plan::link_proposals(&conn, &report.plan)?;
+        Ok(plan_to_view(report.plan, &links))
     };
     inner().map_err(|e| format!("{e:#}"))
 }

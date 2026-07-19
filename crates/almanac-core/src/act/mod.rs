@@ -903,6 +903,37 @@ pub fn record_replan(conn: &mut Connection, actor: &str, summary: &str) -> Resul
     Ok(seq)
 }
 
+/// A queued proposal reduced to what the plan needs to LINK it to an item
+/// (Phase 3.1): its id, kind, current state, and the correlation identity.
+#[derive(Debug, Clone)]
+pub struct CorrelationLink {
+    pub id: i64,
+    pub kind: String,
+    pub state: ProposalState,
+    pub correlation_key: String,
+}
+
+/// Every proposal that carries a correlation key, for linking plan items to
+/// their queued proposals (Phase 3.1). Read-only; the set is the approval queue,
+/// so loading all of them is cheap.
+pub fn correlation_links(conn: &Connection) -> Result<Vec<CorrelationLink>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, state, correlation_key FROM action_proposals
+         WHERE correlation_key IS NOT NULL ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, kind, state, correlation_key) = row?;
+        let state = ProposalState::parse(&state)
+            .with_context(|| format!("unknown proposal state '{state}'"))?;
+        out.push(CorrelationLink { id, kind, state, correlation_key });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::draft::Draft;

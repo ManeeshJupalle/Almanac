@@ -611,7 +611,8 @@ fn plan_cmd() -> Result<()> {
     let candidates = almanac_core::plan::load_candidates(&conn, now)?;
     let config = almanac_core::plan::PriorityConfig::from_env();
     let plan = almanac_core::plan::prioritize(&candidates, &config, now);
-    print_plan(&plan);
+    let links = almanac_core::plan::link_proposals(&conn, &plan)?;
+    print_plan(&plan, &links);
     Ok(())
 }
 
@@ -646,12 +647,17 @@ async fn replan_cmd(reason: Option<String>) -> Result<()> {
     )?;
     println!("replan cycle: {}", report.summary);
     println!("  audited as seq {} (chain-verifiable)", report.audit_seq);
-    print_plan(&report.plan);
+    let links = almanac_core::plan::link_proposals(&conn, &report.plan)?;
+    print_plan(&report.plan, &links);
     Ok(())
 }
 
-/// Render a plan grouped into its three sections, each item with its rationale.
-fn print_plan(plan: &almanac_core::plan::Plan) {
+/// Render a plan grouped into its three sections, each item with its rationale
+/// and any queued proposal(s) linked to it (Phase 3.1).
+fn print_plan(
+    plan: &almanac_core::plan::Plan,
+    links: &std::collections::HashMap<String, Vec<almanac_core::plan::LinkedProposal>>,
+) {
     use almanac_core::plan::Section;
     println!("{}", plan.summary);
     for section in [Section::DoNow, Section::ByEod, Section::CanWait] {
@@ -663,6 +669,11 @@ fn print_plan(plan: &almanac_core::plan::Plan) {
         for item in items {
             println!("  {}. {} (score {})", item.rank, item.candidate.title, item.score);
             println!("     why: {}", item.rationale);
+            if let Some(proposals) = links.get(&item.candidate.key) {
+                for p in proposals {
+                    println!("     proposal #{} [{}] {}", p.id, p.state.as_str(), p.kind);
+                }
+            }
             println!("     {}", item.candidate.deep_link);
         }
     }

@@ -217,6 +217,31 @@ fn plan_ranks_thread_above_a_low_priority_partial() {
     assert!(p.summary.starts_with("Plan: "));
 }
 
+/// Phase 3.1: a plan thread item links to the proposal queued for it, and that
+/// link reflects state changes — proving the plan's inline actions and the queue
+/// act on the SAME proposal (one A1 path, no duplicate execution route).
+#[test]
+fn plan_item_links_to_its_queued_proposal_and_tracks_state() {
+    let (_d, mut conn) = test_db();
+    seed_full_triple(&conn); // ALM-3 thread → one queued proposal
+    let outcome = queue(&mut conn);
+    let pid = outcome.ids[0];
+
+    let now = Utc::now();
+    let p = plan::prioritize(&plan::load_candidates(&conn, now).unwrap(), &PriorityConfig::default(), now);
+
+    let linked = plan::link_proposals(&conn, &p).unwrap();
+    let for_thread = linked.get("thread:ALM-3").expect("thread item links to its proposal");
+    assert_eq!(for_thread.len(), 1);
+    assert_eq!(for_thread[0].id, pid);
+    assert_eq!(for_thread[0].state, ProposalState::Proposed);
+
+    // Rejecting through the shared act path is reflected in the same link.
+    act::reject(&mut conn, pid, "user").unwrap();
+    let relinked = plan::link_proposals(&conn, &p).unwrap();
+    assert_eq!(relinked.get("thread:ALM-3").unwrap()[0].state, ProposalState::Rejected);
+}
+
 fn store_with_extraction(conn: &Connection, obj: &SourceObject, kind: almanac_core::extract::ItemKind) {
     almanac_core::db::insert_source_object(conn, obj).unwrap();
     let item = almanac_core::extract::ExtractedItem::new(
