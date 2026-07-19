@@ -375,6 +375,65 @@ fn reopen_clears_state_and_shows_the_item_again() {
     audit::verify_chain(&conn).unwrap();
 }
 
+// --------------------------------------------- decision capture (3.3) ------
+
+/// True if the factor snapshot contains a factor named `name` (order-robust).
+fn has_factor(factors_json: &str, name: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(factors_json)
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f.get("name").and_then(|v| v.as_str()) == Some(name))
+}
+
+#[test]
+fn item_decision_captures_the_factor_vector() {
+    let (_d, conn) = test_db();
+    seed_full_triple(&conn);
+
+    plan::record_item_decision(&conn, "thread:ALM-3", "user", "dismissed", Utc::now()).unwrap();
+
+    let decisions = plan::load_decisions(&conn).unwrap();
+    assert_eq!(decisions.len(), 1);
+    let d = &decisions[0];
+    assert_eq!(d.item_key, "thread:ALM-3");
+    assert_eq!(d.decision, "dismissed");
+    // Full thread → actionability + hard-evidence factors are snapshotted.
+    assert!(has_factor(&d.factors_json, "actionability"));
+    assert!(has_factor(&d.factors_json, "evidence"));
+}
+
+#[test]
+fn proposal_decision_maps_to_its_thread_item() {
+    let (_d, mut conn) = test_db();
+    seed_full_triple(&conn);
+    let pid = queue(&mut conn).ids[0];
+
+    plan::record_proposal_decision(&conn, pid, "user", "approved", Utc::now()).unwrap();
+
+    let d = &plan::load_decisions(&conn).unwrap()[0];
+    assert_eq!(d.item_key, "thread:ALM-3", "the proposal's correlation identity maps it to its plan item");
+    assert_eq!(d.decision, "approved");
+    assert!(has_factor(&d.factors_json, "actionability"));
+}
+
+#[test]
+fn decisions_are_append_only_and_queryable_by_factor() {
+    let (_d, conn) = test_db();
+    seed_full_triple(&conn);
+    let now = Utc::now();
+
+    plan::record_item_decision(&conn, "thread:ALM-3", "user", "snoozed", now).unwrap();
+    plan::record_item_decision(&conn, "thread:ALM-3", "user", "dismissed", now).unwrap();
+
+    let all = plan::load_decisions(&conn).unwrap();
+    assert_eq!(all.len(), 2, "append-only: repeated decisions are all kept");
+    // "What did the user do with hard-evidence items?" — slice by the snapshot.
+    let on_evidence = all.iter().filter(|d| has_factor(&d.factors_json, "evidence")).count();
+    assert_eq!(on_evidence, 2, "both decisions were on an item that had hard evidence");
+}
+
 fn audit_events(conn: &Connection) -> Vec<String> {
     let mut stmt = conn.prepare("SELECT event FROM audit_records ORDER BY seq ASC").unwrap();
     stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()

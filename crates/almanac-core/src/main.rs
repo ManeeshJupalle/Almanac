@@ -52,6 +52,8 @@ fn main() -> ExitCode {
         // Phase 2.3: prioritized plan (read-only) and a triggered, audited re-plan.
         Some("plan") => plan_cmd(),
         Some("replan") => block_on(replan_cmd(args.get(1).cloned())),
+        // Phase 3.3: the captured decision log (read-only).
+        Some("decisions") => decisions_cmd(),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
             println!(
@@ -101,6 +103,7 @@ fn main() -> ExitCode {
                  Planning (Phase 2.3):\n\
                  \x20 plan                     show the prioritized plan (do now / by EOD / can wait)\n\
                  \x20 replan [reason]          run one audited re-plan cycle (idempotent queueing)\n\
+                 \x20 decisions                show the captured decision log (factors at decision time)\n\
                  \x20 debug-seed-proposal <gmail-ack|slack-check|jira-comment|jira-transition> [native_id]\n\
                  \x20                          DEV-ONLY: seed a test proposal from a stored\n\
                  \x20                          source object (correlation arrives in 2.2)\n\
@@ -615,6 +618,27 @@ fn plan_cmd() -> Result<()> {
     let plan = almanac_core::plan::prioritize(&active, &config, now);
     let links = almanac_core::plan::link_proposals(&conn, &plan)?;
     print_plan(&plan, &links);
+    Ok(())
+}
+
+/// Phase 3.3: print the captured decision log (read-only) — each decision with
+/// the factor vector the user was looking at. The raw signal for 3.4's learning.
+fn decisions_cmd() -> Result<()> {
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let decisions = almanac_core::plan::load_decisions(&conn)?;
+    println!("{} decision(s) recorded (most recent first):", decisions.len());
+    for d in &decisions {
+        let factors: Vec<String> = serde_json::from_str::<serde_json::Value>(&d.factors_json)
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|f| {
+                Some(format!("{} +{}", f.get("name")?.as_str()?, f.get("points")?.as_i64()?))
+            })
+            .collect();
+        println!("  [{}] {} · {} — {}", d.occurred_at, d.decision, d.item_key, factors.join(", "));
+    }
     Ok(())
 }
 

@@ -603,6 +603,117 @@ pub fn set_item_state(
     Ok(seq)
 }
 
+// -------------------------------------------- decision capture (3.3) -------
+
+/// One recorded decision with the candidate's factor vector at decision time.
+#[derive(Debug, Clone)]
+pub struct DecisionEvent {
+    pub id: i64,
+    pub occurred_at: String,
+    pub actor: String,
+    pub item_key: String,
+    pub decision: String,
+    pub factors_json: String,
+}
+
+/// The factor vector the user was looking at, serialized. Recomputes the plan
+/// over ALL candidates (unfiltered by state) so a snoozed/dismissed/executed
+/// item's factors are still captured. `[]` if the item is no longer in the plan.
+fn snapshot_factors_json(conn: &Connection, item_key: &str, now: DateTime<Utc>) -> Result<String> {
+    let candidates = load_candidates(conn, now)?;
+    let plan = prioritize(&candidates, &PriorityConfig::from_env(), now);
+    let json = match plan.items.iter().find(|i| i.candidate.key == item_key) {
+        Some(item) => {
+            let factors: Vec<Value> = item
+                .factors
+                .iter()
+                .map(|f| serde_json::json!({ "name": f.name, "points": f.points, "reason": f.reason }))
+                .collect();
+            serde_json::to_string(&factors)?
+        }
+        None => "[]".to_string(),
+    };
+    Ok(json)
+}
+
+fn insert_decision(
+    conn: &Connection,
+    actor: &str,
+    item_key: &str,
+    decision: &str,
+    factors_json: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO decision_events (occurred_at, actor, item_key, decision, factors_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (now.to_rfc3339(), actor, item_key, decision, factors_json),
+    )?;
+    Ok(())
+}
+
+/// The issue key embedded in a correlation identity (`<src>:<native>|<ISSUE>`).
+fn issue_of(correlation_key: &str) -> Option<&str> {
+    correlation_key.rsplit('|').next().filter(|s| !s.is_empty())
+}
+
+/// Record a decision on a PLAN ITEM (snooze / done / dismiss / reopen), with its
+/// factor snapshot (3.3). Append-only local signal for the learning loop.
+pub fn record_item_decision(
+    conn: &Connection,
+    item_key: &str,
+    actor: &str,
+    decision: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let factors_json = snapshot_factors_json(conn, item_key, now)?;
+    insert_decision(conn, actor, item_key, decision, &factors_json, now)
+}
+
+/// Record a decision on a PROPOSAL (approve / reject / execute). Its correlation
+/// identity maps it back to the plan item (`thread:<ISSUE>`) so the snapshot
+/// lines up with plan-item decisions; a proposal with no correlation key is
+/// recorded under `proposal:<id>` with an empty snapshot (3.3).
+pub fn record_proposal_decision(
+    conn: &Connection,
+    proposal_id: i64,
+    actor: &str,
+    decision: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let ck: Option<String> = conn.query_row(
+        "SELECT correlation_key FROM action_proposals WHERE id = ?1",
+        [proposal_id],
+        |r| r.get(0),
+    )?;
+    let item_key = ck
+        .as_deref()
+        .and_then(issue_of)
+        .map(|issue| format!("thread:{issue}"))
+        .unwrap_or_else(|| format!("proposal:{proposal_id}"));
+    let factors_json = snapshot_factors_json(conn, &item_key, now)?;
+    insert_decision(conn, actor, &item_key, decision, &factors_json, now)
+}
+
+/// All recorded decisions, most recent first (3.3).
+pub fn load_decisions(conn: &Connection) -> Result<Vec<DecisionEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, occurred_at, actor, item_key, decision, factors_json
+         FROM decision_events ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(DecisionEvent {
+            id: r.get(0)?,
+            occurred_at: r.get(1)?,
+            actor: r.get(2)?,
+            item_key: r.get(3)?,
+            decision: r.get(4)?,
+            factors_json: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 fn asker_of(source: SourceId, raw_json: &str) -> Option<String> {
     let raw: Value = serde_json::from_str(raw_json).ok()?;
     match source {

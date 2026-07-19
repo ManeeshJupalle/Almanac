@@ -265,6 +265,9 @@ fn approve_proposal(id: i64) -> Result<String, String> {
         // "user" names the human at the approval UI — the only actor that can
         // move a proposal to Approved (A1).
         almanac_core::act::approve(&mut conn, id, "user")?;
+        // Capture the decision + factor snapshot for the learning loop (3.3).
+        // Best-effort: a capture failure must not undo the approval.
+        let _ = almanac_core::plan::record_proposal_decision(&conn, id, "user", "approved", chrono::Utc::now());
         Ok("approved".to_string())
     };
     inner().map_err(|e| format!("{e:#}"))
@@ -276,6 +279,7 @@ fn reject_proposal(id: i64) -> Result<String, String> {
         let path = almanac_core::init_default_db()?;
         let mut conn = almanac_core::db::open(&path)?;
         almanac_core::act::reject(&mut conn, id, "user")?;
+        let _ = almanac_core::plan::record_proposal_decision(&conn, id, "user", "rejected", chrono::Utc::now());
         Ok("rejected".to_string())
     };
     inner().map_err(|e| format!("{e:#}"))
@@ -317,6 +321,8 @@ async fn execute_proposal(id: i64) -> Result<String, String> {
                 }
             }
             .map_err(|e| format!("{e:#}"))?;
+            // Capture the executed decision + factor snapshot (3.3). Best-effort.
+            let _ = almanac_core::plan::record_proposal_decision(&conn, id, "user", "executed", chrono::Utc::now());
             Ok(format!(
                 "executed (http {}, audit seq {}..{})",
                 receipt.http_status, receipt.started_seq, receipt.final_seq
@@ -485,6 +491,9 @@ fn set_plan_item_state(
             other => anyhow::bail!("unknown plan item status '{other}'"),
         };
         almanac_core::plan::set_item_state(&mut conn, &item_key, st, until, "user", &status, now)?;
+        // Capture the decision + factor snapshot for the learning loop (3.3).
+        let decision = if status == "open" { "reopened" } else { status.as_str() };
+        let _ = almanac_core::plan::record_item_decision(&conn, &item_key, "user", decision, now);
 
         // Fresh, filtered plan so the UI reflects the change in one round trip.
         let candidates = almanac_core::plan::load_candidates(&conn, now)?;
