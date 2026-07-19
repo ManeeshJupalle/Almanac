@@ -715,6 +715,48 @@ body {
   cursor: help;
 }
 
+/* Phase 3.4: learned-weighting panel. */
+.learning {
+  margin: 0.4rem 0 0.7rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px dashed var(--rule);
+}
+.learning-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.learning-title {
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+.learning-toggle {
+  font-size: 0.56rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.learning-toggle:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+.learning-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.learning-item {
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--ink);
+}
+
 /* Phase 3.2: per-item snooze / done / dismiss controls. */
 .plan-item-actions {
   display: inline-flex;

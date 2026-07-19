@@ -457,7 +457,7 @@ fn get_plan() -> Result<PlanView, String> {
         let candidates = almanac_core::plan::load_candidates(&conn, now)?;
         let states = almanac_core::plan::load_item_states(&conn)?;
         let active = almanac_core::plan::active_candidates(candidates, &states, now);
-        let config = almanac_core::plan::PriorityConfig::from_env();
+        let config = almanac_core::plan::effective_config(&conn)?;
         let plan = almanac_core::plan::prioritize(&active, &config, now);
         let links = almanac_core::plan::link_proposals(&conn, &plan)?;
         Ok(plan_to_view(plan, &links))
@@ -499,7 +499,7 @@ fn set_plan_item_state(
         let candidates = almanac_core::plan::load_candidates(&conn, now)?;
         let states = almanac_core::plan::load_item_states(&conn)?;
         let active = almanac_core::plan::active_candidates(candidates, &states, now);
-        let config = almanac_core::plan::PriorityConfig::from_env();
+        let config = almanac_core::plan::effective_config(&conn)?;
         let plan = almanac_core::plan::prioritize(&active, &config, now);
         let links = almanac_core::plan::link_proposals(&conn, &plan)?;
         Ok(plan_to_view(plan, &links))
@@ -518,7 +518,7 @@ fn replan(reason: Option<String>) -> Result<PlanView, String> {
         let path = almanac_core::init_default_db()?;
         let mut conn = almanac_core::db::open(&path)?;
         let self_id = almanac_core::db::get_meta(&conn, almanac_core::db::JIRA_SELF_ACCOUNT_ID)?;
-        let config = almanac_core::plan::PriorityConfig::from_env();
+        let config = almanac_core::plan::effective_config(&conn)?;
         let reason = reason.unwrap_or_else(|| "manual refresh".to_string());
         let report = almanac_core::plan::replan_cycle(
             &mut conn,
@@ -530,6 +530,66 @@ fn replan(reason: Option<String>) -> Result<PlanView, String> {
         )?;
         let links = almanac_core::plan::link_proposals(&conn, &report.plan)?;
         Ok(plan_to_view(report.plan, &links))
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
+// ------------------------------------------------ learning flywheel (3.4) --
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnedWeightView {
+    pub factor: String,
+    pub multiplier: f64,
+    pub positives: usize,
+    pub negatives: usize,
+    pub rationale: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningView {
+    pub enabled: bool,
+    pub adjustments: Vec<LearnedWeightView>,
+}
+
+fn learning_view(conn: &almanac_core::db::Connection) -> anyhow::Result<LearningView> {
+    let enabled = almanac_core::plan::learning_enabled(conn)?;
+    // Always surface what learning WOULD do, even when off, so the UI can explain
+    // it before you enable it.
+    let adjustments = almanac_core::plan::learn_weights(conn)?
+        .into_iter()
+        .map(|w| LearnedWeightView {
+            factor: w.factor,
+            multiplier: w.multiplier,
+            positives: w.positives,
+            negatives: w.negatives,
+            rationale: w.rationale,
+        })
+        .collect();
+    Ok(LearningView { enabled, adjustments })
+}
+
+/// What Almanac has learned from your decisions (3.4) — read-only.
+#[tauri::command]
+fn get_learning() -> Result<LearningView, String> {
+    let inner = || -> anyhow::Result<LearningView> {
+        let path = almanac_core::init_default_db()?;
+        let conn = almanac_core::db::open(&path)?;
+        learning_view(&conn)
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
+/// Turn learned weighting on/off — the "reset to defaults" control (3.4).
+/// Returns the updated learning view; the caller re-fetches the plan.
+#[tauri::command]
+fn set_learning_enabled(enabled: bool) -> Result<LearningView, String> {
+    let inner = || -> anyhow::Result<LearningView> {
+        let path = almanac_core::init_default_db()?;
+        let conn = almanac_core::db::open(&path)?;
+        almanac_core::plan::set_learning_enabled(&conn, enabled)?;
+        learning_view(&conn)
     };
     inner().map_err(|e| format!("{e:#}"))
 }
@@ -578,7 +638,9 @@ pub fn run() {
             verify_audit_chain,
             get_plan,
             replan,
-            set_plan_item_state
+            set_plan_item_state,
+            get_learning,
+            set_learning_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

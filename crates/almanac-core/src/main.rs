@@ -54,6 +54,8 @@ fn main() -> ExitCode {
         Some("replan") => block_on(replan_cmd(args.get(1).cloned())),
         // Phase 3.3: the captured decision log (read-only).
         Some("decisions") => decisions_cmd(),
+        // Phase 3.4: what the ranker has learned from your decisions (read-only).
+        Some("learning") => learning_cmd(),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
             println!(
@@ -104,6 +106,7 @@ fn main() -> ExitCode {
                  \x20 plan                     show the prioritized plan (do now / by EOD / can wait)\n\
                  \x20 replan [reason]          run one audited re-plan cycle (idempotent queueing)\n\
                  \x20 decisions                show the captured decision log (factors at decision time)\n\
+                 \x20 learning                 show what the ranker learned from your decisions\n\
                  \x20 debug-seed-proposal <gmail-ack|slack-check|jira-comment|jira-transition> [native_id]\n\
                  \x20                          DEV-ONLY: seed a test proposal from a stored\n\
                  \x20                          source object (correlation arrives in 2.2)\n\
@@ -614,7 +617,7 @@ fn plan_cmd() -> Result<()> {
     let candidates = almanac_core::plan::load_candidates(&conn, now)?;
     let states = almanac_core::plan::load_item_states(&conn)?;
     let active = almanac_core::plan::active_candidates(candidates, &states, now);
-    let config = almanac_core::plan::PriorityConfig::from_env();
+    let config = almanac_core::plan::effective_config(&conn)?;
     let plan = almanac_core::plan::prioritize(&active, &config, now);
     let links = almanac_core::plan::link_proposals(&conn, &plan)?;
     print_plan(&plan, &links);
@@ -642,6 +645,23 @@ fn decisions_cmd() -> Result<()> {
     Ok(())
 }
 
+/// Phase 3.4: show what the ranker has learned from the decision log (read-only)
+/// — the bounded per-factor multipliers and why each was applied.
+fn learning_cmd() -> Result<()> {
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let enabled = almanac_core::plan::learning_enabled(&conn)?;
+    let adjustments = almanac_core::plan::learn_weights(&conn)?;
+    println!("learning: {}", if enabled { "ON" } else { "OFF (reset to defaults)" });
+    if adjustments.is_empty() {
+        println!("  no adjustments yet (needs more decisions before any factor is tuned)");
+    } else {
+        for w in &adjustments {
+            println!("  {}", w.rationale);
+        }
+    }
+    Ok(())
+}
+
 /// Phase 2.3: run ONE re-plan cycle — idempotently queue proposals, re-rank, and
 /// append a traceable audit record (actor + reason). Read-only externally.
 async fn replan_cmd(reason: Option<String>) -> Result<()> {
@@ -662,7 +682,7 @@ async fn replan_cmd(reason: Option<String>) -> Result<()> {
         }
         None => almanac_core::db::get_meta(&conn, key)?,
     };
-    let config = almanac_core::plan::PriorityConfig::from_env();
+    let config = almanac_core::plan::effective_config(&conn)?;
     let report = almanac_core::plan::replan_cycle(
         &mut conn,
         &config,

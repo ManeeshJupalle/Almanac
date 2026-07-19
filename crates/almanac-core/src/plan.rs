@@ -135,10 +135,15 @@ pub struct RankedItem {
 pub struct PriorityConfig {
     /// Case-insensitive substrings; an asker containing one gets the asker bonus.
     pub important_senders: Vec<String>,
+    /// Learned per-factor multipliers (Phase 3.4), keyed by factor name. Empty =
+    /// no learning (base weights). Only learnable factors ever appear here;
+    /// `deadline` is objective urgency and is never scaled.
+    pub weights: HashMap<String, f64>,
 }
 
 impl PriorityConfig {
-    /// Priority senders from `ALMANAC_PRIORITY_SENDERS` (comma-separated).
+    /// Priority senders from `ALMANAC_PRIORITY_SENDERS` (comma-separated). No
+    /// learned weights (base scoring) — see `effective_config` for the learned one.
     pub fn from_env() -> Self {
         let important_senders = std::env::var("ALMANAC_PRIORITY_SENDERS")
             .unwrap_or_default()
@@ -146,7 +151,11 @@ impl PriorityConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        Self { important_senders }
+        Self { important_senders, weights: HashMap::new() }
+    }
+
+    fn weight(&self, factor: &str) -> f64 {
+        self.weights.get(factor).copied().unwrap_or(1.0)
     }
 
     fn is_important(&self, asker: &str) -> bool {
@@ -283,6 +292,18 @@ fn score_candidate(c: &Candidate, config: &PriorityConfig, now: DateTime<Utc>) -
             points: W_ASKER,
             reason: "from a priority sender".into(),
         });
+    }
+
+    // Learned weighting (Phase 3.4): scale each factor by its multiplier (1.0 for
+    // any not in the map, so base scoring is unchanged when learning is off).
+    // Uniform across all candidates in a run, so ranking stays stable.
+    if !config.weights.is_empty() {
+        for f in &mut factors {
+            let m = config.weight(f.name);
+            if m != 1.0 {
+                f.points = ((f.points as f64) * m).round() as i32;
+            }
+        }
     }
 
     let score = factors.iter().map(|f| f.points).sum();
@@ -714,6 +735,102 @@ pub fn load_decisions(conn: &Connection) -> Result<Vec<DecisionEvent>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+// ------------------------------------------------ learning flywheel (3.4) --
+
+/// Factors whose weight is learned from behavior. `deadline` is objective urgency
+/// and is deliberately excluded — Almanac never learns a deadline away.
+const LEARNABLE_FACTORS: &[&str] = &["actionability", "evidence", "classifier", "staleness", "asker"];
+/// Decisions that read as "this was worth my attention".
+const POSITIVE_DECISIONS: &[&str] = &["approved", "executed", "done"];
+/// Decisions that read as "this was not worth my attention".
+const NEGATIVE_DECISIONS: &[&str] = &["dismissed"];
+/// Don't adjust a factor until it has at least this many (pos+neg) signals.
+const MIN_SAMPLES: usize = 3;
+const WEIGHT_MIN: f64 = 0.5;
+const WEIGHT_MAX: f64 = 1.5;
+const LEARNING_ENABLED_KEY: &str = "learning_enabled";
+
+/// A learned adjustment to one factor's weight, with its evidence + rationale.
+#[derive(Debug, Clone)]
+pub struct LearnedWeight {
+    pub factor: String,
+    pub multiplier: f64,
+    pub positives: usize,
+    pub negatives: usize,
+    pub rationale: String,
+}
+
+fn decision_has_factor(factors_json: &str, name: &str) -> bool {
+    serde_json::from_str::<Value>(factors_json)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .map(|arr| arr.iter().any(|f| f.get("name").and_then(Value::as_str) == Some(name)))
+        .unwrap_or(false)
+}
+
+/// Learn a bounded, explainable multiplier per factor from the decision log
+/// (3.4). Only factors with ≥ `MIN_SAMPLES` signals AND a net change are
+/// returned; everything else stays 1.0. Deterministic: same log → same weights.
+pub fn learn_weights(conn: &Connection) -> Result<Vec<LearnedWeight>> {
+    let decisions = load_decisions(conn)?;
+    let mut out = Vec::new();
+    for &factor in LEARNABLE_FACTORS {
+        let (mut positives, mut negatives) = (0usize, 0usize);
+        for d in &decisions {
+            if !decision_has_factor(&d.factors_json, factor) {
+                continue;
+            }
+            if POSITIVE_DECISIONS.contains(&d.decision.as_str()) {
+                positives += 1;
+            } else if NEGATIVE_DECISIONS.contains(&d.decision.as_str()) {
+                negatives += 1;
+            }
+        }
+        let total = positives + negatives;
+        if total < MIN_SAMPLES {
+            continue;
+        }
+        let rate = positives as f64 / total as f64; // engagement, 0..=1
+        let multiplier = (WEIGHT_MIN + rate).clamp(WEIGHT_MIN, WEIGHT_MAX);
+        let multiplier = (multiplier * 100.0).round() / 100.0; // 2 dp, stable
+        if (multiplier - 1.0).abs() < f64::EPSILON {
+            continue; // balanced → no net adjustment
+        }
+        let (arrow, verb, shown) = if multiplier > 1.0 {
+            ("↑", "act on", positives)
+        } else {
+            ("↓", "dismiss", negatives)
+        };
+        let rationale = format!(
+            "{factor} {arrow}{multiplier:.2}× — you {verb} {shown}/{total} items with this factor"
+        );
+        out.push(LearnedWeight { factor: factor.to_string(), multiplier, positives, negatives, rationale });
+    }
+    Ok(out)
+}
+
+/// Whether learned weighting is applied (3.4). Defaults ON — but nothing changes
+/// until a factor crosses `MIN_SAMPLES`, and it is one-click resettable.
+pub fn learning_enabled(conn: &Connection) -> Result<bool> {
+    Ok(crate::db::get_meta(conn, LEARNING_ENABLED_KEY)?.as_deref() != Some("0"))
+}
+
+/// Turn learned weighting on/off — the "reset to defaults" control. Off = base
+/// weights everywhere (identical to pre-3.4 behavior).
+pub fn set_learning_enabled(conn: &Connection, enabled: bool) -> Result<()> {
+    crate::db::set_meta(conn, LEARNING_ENABLED_KEY, if enabled { "1" } else { "0" })
+}
+
+/// The config the app actually ranks with: env priority senders + learned
+/// weights when learning is enabled (3.4). Base config when it is off.
+pub fn effective_config(conn: &Connection) -> Result<PriorityConfig> {
+    let mut config = PriorityConfig::from_env();
+    if learning_enabled(conn)? {
+        config.weights = learn_weights(conn)?.into_iter().map(|w| (w.factor, w.multiplier)).collect();
+    }
+    Ok(config)
+}
+
 fn asker_of(source: SourceId, raw_json: &str) -> Option<String> {
     let raw: Value = serde_json::from_str(raw_json).ok()?;
     match source {
@@ -868,7 +985,8 @@ mod tests {
 
     #[test]
     fn asker_weight_promotes_priority_sender() {
-        let cfg = PriorityConfig { important_senders: vec!["boss@corp.com".into()] };
+        let cfg =
+            PriorityConfig { important_senders: vec!["boss@corp.com".into()], ..Default::default() };
         let mut vip = base("vip", CandidateKind::Ask);
         // Priority sender is the SECOND asker — the fix must scan all of them.
         vip.askers = vec!["someone@corp.com".into(), "Big Boss <boss@corp.com>".into()];

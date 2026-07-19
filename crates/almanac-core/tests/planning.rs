@@ -434,6 +434,91 @@ fn decisions_are_append_only_and_queryable_by_factor() {
     assert_eq!(on_evidence, 2, "both decisions were on an item that had hard evidence");
 }
 
+// ------------------------------------------------ learning flywheel (3.4) --
+
+/// Insert a decision carrying exactly one factor, for controlled learning tests.
+fn seed_decision(conn: &Connection, decision: &str, factor: &str) {
+    let factors_json = format!("[{{\"name\":\"{factor}\",\"points\":10,\"reason\":\"x\"}}]");
+    conn.execute(
+        "INSERT INTO decision_events (occurred_at, actor, item_key, decision, factors_json)
+         VALUES ('2026-07-18T00:00:00+00:00', 'user', 'k', ?1, ?2)",
+        (decision, factors_json.as_str()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn repeated_dismissal_downweights_a_factor_and_explains() {
+    let (_d, conn) = test_db();
+    for _ in 0..4 {
+        seed_decision(&conn, "dismissed", "classifier");
+    }
+
+    let learned = plan::learn_weights(&conn).unwrap();
+    let w = learned.iter().find(|w| w.factor == "classifier").expect("classifier is tuned");
+    assert!(w.multiplier < 1.0, "consistent dismissal downweights the factor");
+    assert_eq!(w.negatives, 4);
+    assert!(w.rationale.contains("dismiss"), "the adjustment explains itself: {}", w.rationale);
+
+    // It flows into the config the ranker actually uses.
+    let cfg = plan::effective_config(&conn).unwrap();
+    assert!(cfg.weights.get("classifier").copied().unwrap() < 1.0);
+}
+
+#[test]
+fn below_min_samples_no_adjustment() {
+    let (_d, conn) = test_db();
+    // Only two signals — under MIN_SAMPLES; must not tune anything.
+    seed_decision(&conn, "dismissed", "asker");
+    seed_decision(&conn, "dismissed", "asker");
+    assert!(plan::learn_weights(&conn).unwrap().is_empty(), "too little signal → no adjustment");
+}
+
+#[test]
+fn learning_reset_restores_default_weights() {
+    let (_d, conn) = test_db();
+    for _ in 0..4 {
+        seed_decision(&conn, "dismissed", "classifier");
+    }
+    // Learning is ON by default → weights present.
+    assert!(!plan::effective_config(&conn).unwrap().weights.is_empty());
+
+    // Reset (disable) → base weights.
+    plan::set_learning_enabled(&conn, false).unwrap();
+    assert!(plan::effective_config(&conn).unwrap().weights.is_empty(), "reset restores defaults");
+
+    // Re-enable → learned weights return.
+    plan::set_learning_enabled(&conn, true).unwrap();
+    assert!(!plan::effective_config(&conn).unwrap().weights.is_empty());
+}
+
+#[test]
+fn learned_downweight_lowers_the_score_but_stays_deterministic() {
+    let (_d, conn) = test_db();
+    seed_full_triple(&conn);
+    let now = Utc::now();
+
+    let base = plan::prioritize(&plan::load_candidates(&conn, now).unwrap(), &PriorityConfig::default(), now);
+    let base_score = base.items.iter().find(|i| i.candidate.key == "thread:ALM-3").unwrap().score;
+
+    for _ in 0..4 {
+        seed_decision(&conn, "dismissed", "actionability");
+    }
+    let cfg = plan::effective_config(&conn).unwrap();
+    let s = |c: &plan::PriorityConfig| {
+        plan::prioritize(&plan::load_candidates(&conn, now).unwrap(), c, now)
+            .items
+            .iter()
+            .find(|i| i.candidate.key == "thread:ALM-3")
+            .unwrap()
+            .score
+    };
+    let s1 = s(&cfg);
+    let s2 = s(&cfg);
+    assert!(s1 < base_score, "downweighting actionability lowers the score ({s1} < {base_score})");
+    assert_eq!(s1, s2, "same weights + inputs → same score (deterministic)");
+}
+
 fn audit_events(conn: &Connection) -> Vec<String> {
     let mut stmt = conn.prepare("SELECT event FROM audit_records ORDER BY seq ASC").unwrap();
     stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()

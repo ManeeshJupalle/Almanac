@@ -83,6 +83,16 @@ type Plan = {
   items: PlanItem[];
 };
 
+type LearnedWeight = {
+  factor: string;
+  multiplier: number;
+  positives: number;
+  negatives: number;
+  rationale: string;
+};
+
+type Learning = { enabled: boolean; adjustments: LearnedWeight[] };
+
 const PROPOSAL_KIND_LABEL: Record<Proposal["kind"], string> = {
   gmail_reply: "Gmail reply",
   slack_post: "Slack post",
@@ -121,6 +131,7 @@ function App() {
   const [chainStatus, setChainStatus] = useState<string | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [replanning, setReplanning] = useState(false);
+  const [learning, setLearning] = useState<Learning | null>(null);
 
   const loadProposals = useCallback(async () => {
     try {
@@ -135,11 +146,17 @@ function App() {
     }
   }, []);
 
-  // Read-only plan refresh (no queueing, no audit) so linked-proposal chips stay
-  // in sync after a decision made from either panel. Secondary — ignore failure.
+  // Read-only plan + learning refresh so both stay in sync after a decision made
+  // from either panel (a decision can shift the learned weights). Secondary —
+  // ignore failure so the primary panels are never blanked out.
   const loadPlan = useCallback(async () => {
     try {
-      setPlan(await invoke<Plan>("get_plan"));
+      const [thePlan, theLearning] = await Promise.all([
+        invoke<Plan>("get_plan"),
+        invoke<Learning>("get_learning").catch(() => null),
+      ]);
+      setPlan(thePlan);
+      if (theLearning) setLearning(theLearning);
     } catch {
       /* plan is a secondary panel; its refresh failure must not surface */
     }
@@ -147,16 +164,18 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, stored, thePlan] = await Promise.all([
+      const [status, stored, thePlan, theLearning] = await Promise.all([
         invoke<SourceStatus[]>("get_connection_status"),
         invoke<Briefing | null>("get_briefing"),
-        // The plan is a secondary panel: a failure here must not blank out the
-        // connection status and briefing, so it settles to null on its own.
+        // The plan/learning are secondary panels: a failure here must not blank
+        // out the connection status and briefing, so each settles to null.
         invoke<Plan>("get_plan").catch(() => null),
+        invoke<Learning>("get_learning").catch(() => null),
       ]);
       setStatuses(status);
       setBriefing(stored);
       setPlan(thePlan);
+      setLearning(theLearning);
       await loadProposals();
     } catch (e) {
       setError(String(e));
@@ -164,6 +183,22 @@ function App() {
       setLoading(false);
     }
   }, [loadProposals]);
+
+  // Phase 3.4: toggle learned weighting (the reset). Re-fetches the plan since
+  // the ranking changes.
+  const toggleLearning = useCallback(async () => {
+    if (!learning) return;
+    setError(null);
+    try {
+      const updated = await invoke<Learning>("set_learning_enabled", {
+        enabled: !learning.enabled,
+      });
+      setLearning(updated);
+      await loadPlan();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [learning, loadPlan]);
 
   const runReplan = useCallback(async () => {
     setReplanning(true);
@@ -455,6 +490,34 @@ function App() {
               deterministic order — every rank shows its factors · updated{" "}
               {new Date(plan.generatedAt).toLocaleTimeString()}
             </p>
+            {learning &&
+              (learning.adjustments.length > 0 || !learning.enabled) && (
+                <div className="learning" aria-label="Learned weighting">
+                  <div className="learning-head">
+                    <span className="learning-title">
+                      {learning.enabled
+                        ? "Tuned to your decisions"
+                        : "Using default weights"}
+                    </span>
+                    <button
+                      className="learning-toggle"
+                      onClick={toggleLearning}
+                      title="Learned weights are bounded (0.5–1.5×) and derived only from your own decisions on this machine."
+                    >
+                      {learning.enabled ? "Reset to defaults" : "Enable learning"}
+                    </button>
+                  </div>
+                  {learning.enabled && learning.adjustments.length > 0 && (
+                    <ul className="learning-list">
+                      {learning.adjustments.map((w) => (
+                        <li key={w.factor} className="learning-item">
+                          {w.rationale}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             {(["do now", "by EOD", "can wait"] as const).map((sec) => {
               const items = plan.items.filter((i) => i.section === sec);
               if (items.length === 0) return null;
