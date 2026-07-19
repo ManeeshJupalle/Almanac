@@ -307,6 +307,74 @@ fn gmail_event_notification_is_not_a_calendar_deadline() {
     assert_eq!(gcal_item.section, plan::Section::DoNow);
 }
 
+// -------------------------------------------------- item state (3.2) -------
+
+/// The active (state-filtered) candidate set at `now`.
+fn active(conn: &Connection, now: chrono::DateTime<Utc>) -> Vec<plan::Candidate> {
+    let candidates = plan::load_candidates(conn, now).unwrap();
+    let states = plan::load_item_states(conn).unwrap();
+    plan::active_candidates(candidates, &states, now)
+}
+
+fn in_plan(conn: &Connection, now: chrono::DateTime<Utc>, key: &str) -> bool {
+    plan::prioritize(&active(conn, now), &PriorityConfig::default(), now)
+        .items
+        .iter()
+        .any(|i| i.candidate.key == key)
+}
+
+#[test]
+fn dismissed_item_leaves_the_plan_and_audits() {
+    let (_d, mut conn) = test_db();
+    seed_full_triple(&conn);
+    let now = Utc::now();
+    assert!(in_plan(&conn, now, "thread:ALM-3"), "starts in the plan");
+
+    plan::set_item_state(&mut conn, "thread:ALM-3", Some(plan::ItemStatus::Dismissed), None, "user", "not now", now)
+        .unwrap();
+
+    assert!(!in_plan(&conn, now, "thread:ALM-3"), "dismissed item is gone");
+    assert!(audit_events(&conn).iter().any(|e| e == "plan_item_dismissed"), "the dismissal is audited");
+    audit::verify_chain(&conn).unwrap();
+}
+
+#[test]
+fn snoozed_item_returns_when_the_snooze_elapses() {
+    let (_d, mut conn) = test_db();
+    seed_full_triple(&conn);
+    let now = Utc::now();
+
+    plan::set_item_state(
+        &mut conn,
+        "thread:ALM-3",
+        Some(plan::ItemStatus::Snoozed),
+        Some(now + Duration::hours(2)),
+        "user",
+        "later",
+        now,
+    )
+    .unwrap();
+    assert!(!in_plan(&conn, now, "thread:ALM-3"), "snoozed item is hidden until due");
+
+    let later = now + Duration::hours(3);
+    assert!(in_plan(&conn, later, "thread:ALM-3"), "snoozed item returns once the snooze elapses");
+}
+
+#[test]
+fn reopen_clears_state_and_shows_the_item_again() {
+    let (_d, mut conn) = test_db();
+    seed_full_triple(&conn);
+    let now = Utc::now();
+
+    plan::set_item_state(&mut conn, "thread:ALM-3", Some(plan::ItemStatus::Done), None, "user", "done", now)
+        .unwrap();
+    assert!(!in_plan(&conn, now, "thread:ALM-3"), "done item leaves the plan");
+
+    plan::set_item_state(&mut conn, "thread:ALM-3", None, None, "user", "reopen", now).unwrap();
+    assert!(in_plan(&conn, now, "thread:ALM-3"), "reopened item is back");
+    audit::verify_chain(&conn).unwrap();
+}
+
 fn audit_events(conn: &Connection) -> Vec<String> {
     let mut stmt = conn.prepare("SELECT event FROM audit_records ORDER BY seq ASC").unwrap();
     stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()

@@ -364,6 +364,8 @@ pub struct ProposalRefView {
 #[serde(rename_all = "camelCase")]
 pub struct PlanItemView {
     pub rank: usize,
+    /// Stable plan-item identity (Phase 3.2) — used to snooze/dismiss/complete it.
+    pub item_key: String,
     pub title: String,
     pub kind: String,
     pub section: String,
@@ -419,6 +421,7 @@ fn plan_to_view(
                     .unwrap_or_default();
                 PlanItemView {
                     rank: i.rank,
+                    item_key: i.candidate.key.clone(),
                     title: i.candidate.title,
                     kind: candidate_kind_str(i.candidate.kind).to_string(),
                     section: i.section.as_str().to_string(),
@@ -446,8 +449,49 @@ fn get_plan() -> Result<PlanView, String> {
         let conn = almanac_core::db::open(&path)?;
         let now = chrono::Utc::now();
         let candidates = almanac_core::plan::load_candidates(&conn, now)?;
+        let states = almanac_core::plan::load_item_states(&conn)?;
+        let active = almanac_core::plan::active_candidates(candidates, &states, now);
         let config = almanac_core::plan::PriorityConfig::from_env();
-        let plan = almanac_core::plan::prioritize(&candidates, &config, now);
+        let plan = almanac_core::plan::prioritize(&active, &config, now);
+        let links = almanac_core::plan::link_proposals(&conn, &plan)?;
+        Ok(plan_to_view(plan, &links))
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
+/// Set a plan item's state (Phase 3.2): snooze / done / dismiss / reopen. Audited
+/// (actor + reason), no external side-effect. Returns the fresh, filtered plan.
+/// `status`: "snoozed" | "done" | "dismissed" | "open"; `snoozeHours` applies
+/// only to "snoozed" (default 24h).
+#[tauri::command]
+fn set_plan_item_state(
+    item_key: String,
+    status: String,
+    snooze_hours: Option<i64>,
+) -> Result<PlanView, String> {
+    use almanac_core::plan::ItemStatus;
+    let inner = || -> anyhow::Result<PlanView> {
+        let path = almanac_core::init_default_db()?;
+        let mut conn = almanac_core::db::open(&path)?;
+        let now = chrono::Utc::now();
+        let (st, until) = match status.as_str() {
+            "open" => (None, None),
+            "snoozed" => {
+                let hrs = snooze_hours.unwrap_or(24).clamp(1, 24 * 30);
+                (Some(ItemStatus::Snoozed), Some(now + chrono::Duration::hours(hrs)))
+            }
+            "done" => (Some(ItemStatus::Done), None),
+            "dismissed" => (Some(ItemStatus::Dismissed), None),
+            other => anyhow::bail!("unknown plan item status '{other}'"),
+        };
+        almanac_core::plan::set_item_state(&mut conn, &item_key, st, until, "user", &status, now)?;
+
+        // Fresh, filtered plan so the UI reflects the change in one round trip.
+        let candidates = almanac_core::plan::load_candidates(&conn, now)?;
+        let states = almanac_core::plan::load_item_states(&conn)?;
+        let active = almanac_core::plan::active_candidates(candidates, &states, now);
+        let config = almanac_core::plan::PriorityConfig::from_env();
+        let plan = almanac_core::plan::prioritize(&active, &config, now);
         let links = almanac_core::plan::link_proposals(&conn, &plan)?;
         Ok(plan_to_view(plan, &links))
     };
@@ -524,7 +568,8 @@ pub fn run() {
             execute_proposal,
             verify_audit_chain,
             get_plan,
-            replan
+            replan,
+            set_plan_item_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -61,6 +61,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "app_meta",
         sql: include_str!("../migrations/0009_app_meta.sql"),
     },
+    Migration {
+        version: 10,
+        name: "plan_item_state",
+        sql: include_str!("../migrations/0010_plan_item_state.sql"),
+    },
 ];
 
 /// Open the database at `path`, creating parent directories and the file on
@@ -560,6 +565,7 @@ mod tests {
                 "briefing_items".to_string(),
                 "briefings".to_string(),
                 "extracted_items".to_string(),
+                "plan_item_state".to_string(),
                 "proposal_evidence".to_string(),
                 "schema_migrations".to_string(),
                 "source_objects".to_string(),

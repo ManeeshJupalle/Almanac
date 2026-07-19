@@ -482,6 +482,127 @@ pub fn link_proposals(
     Ok(out)
 }
 
+// ------------------------------------------------- item state (3.2) --------
+
+/// A plan item's resolved status (Phase 3.2). Absence of a row means "open".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemStatus {
+    Snoozed,
+    Done,
+    Dismissed,
+}
+
+impl ItemStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ItemStatus::Snoozed => "snoozed",
+            ItemStatus::Done => "done",
+            ItemStatus::Dismissed => "dismissed",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "snoozed" => ItemStatus::Snoozed,
+            "done" => ItemStatus::Done,
+            "dismissed" => ItemStatus::Dismissed,
+            _ => return None,
+        })
+    }
+}
+
+/// The stored state of an acted-on plan item.
+#[derive(Debug, Clone)]
+pub struct ItemState {
+    pub status: ItemStatus,
+    pub snooze_until: Option<DateTime<Utc>>,
+}
+
+/// Load the states of items the user has acted on (open items have no row).
+pub fn load_item_states(conn: &Connection) -> Result<HashMap<PlanKey, ItemState>> {
+    let mut stmt = conn.prepare("SELECT item_key, status, snooze_until FROM plan_item_state")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+    })?;
+    let mut out = HashMap::new();
+    for row in rows {
+        let (key, status, snooze) = row?;
+        let status = ItemStatus::parse(&status)
+            .with_context(|| format!("unknown plan item status '{status}'"))?;
+        let snooze_until = snooze.as_deref().map(parse_utc).transpose()?;
+        out.insert(key, ItemState { status, snooze_until });
+    }
+    Ok(out)
+}
+
+/// Drop items the user has resolved (done / dismissed) and snoozed items whose
+/// snooze has not yet elapsed. A snoozed item past its time is treated as open
+/// again (no write here — the read stays pure; a later mutation clears the row).
+pub fn active_candidates(
+    candidates: Vec<Candidate>,
+    states: &HashMap<PlanKey, ItemState>,
+    now: DateTime<Utc>,
+) -> Vec<Candidate> {
+    candidates
+        .into_iter()
+        .filter(|c| match states.get(&c.key) {
+            None => true,
+            Some(s) => match s.status {
+                ItemStatus::Done | ItemStatus::Dismissed => false,
+                // Suppressed until due; a missing timestamp fails open (shown).
+                ItemStatus::Snoozed => s.snooze_until.is_none_or(|until| now >= until),
+            },
+        })
+        .collect()
+}
+
+/// Set (or clear) a plan item's state, atomically with a hash-chained audit
+/// record (L1) — the table is the current state, the audit log the history, no
+/// silent mutation. `status = None` clears the row (reopen). Returns the seq.
+pub fn set_item_state(
+    conn: &mut Connection,
+    item_key: &str,
+    status: Option<ItemStatus>,
+    snooze_until: Option<DateTime<Utc>>,
+    actor: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<i64> {
+    let tx = conn.transaction()?;
+    match status {
+        Some(s) => {
+            tx.execute(
+                "INSERT INTO plan_item_state (item_key, status, snooze_until, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(item_key) DO UPDATE SET
+                     status = excluded.status,
+                     snooze_until = excluded.snooze_until,
+                     updated_at = excluded.updated_at",
+                (
+                    item_key,
+                    s.as_str(),
+                    snooze_until.map(|d| d.to_rfc3339()),
+                    now.to_rfc3339(),
+                ),
+            )?;
+        }
+        None => {
+            tx.execute("DELETE FROM plan_item_state WHERE item_key = ?1", [item_key])?;
+        }
+    }
+    let status_str = status.map(|s| s.as_str()).unwrap_or("reopened");
+    let event = format!("plan_item_{status_str}");
+    let summary = format!("item={item_key}; status={status_str}; reason={reason}");
+    let seq = crate::act::audit::append(
+        &tx,
+        actor,
+        &event,
+        None,
+        &crate::act::audit::sha256_hex(summary.as_bytes()),
+    )?;
+    tx.commit()?;
+    Ok(seq)
+}
+
 fn asker_of(source: SourceId, raw_json: &str) -> Option<String> {
     let raw: Value = serde_json::from_str(raw_json).ok()?;
     match source {
@@ -537,8 +658,12 @@ pub fn replan_cycle(
         Duration::hours(24),
     )?;
 
+    // Queueing above is unaffected by plan-item state (a dismissed item's action
+    // still lives in the queue); state only filters the DISPLAYED plan.
     let candidates = build_candidates(conn, &threads, now)?;
-    let plan = prioritize(&candidates, config, now);
+    let states = load_item_states(conn)?;
+    let active = active_candidates(candidates, &states, now);
+    let plan = prioritize(&active, config, now);
 
     let summary = format!(
         "reason={reason}; queued={}; skipped_dup={}; ranked={}; top={}",

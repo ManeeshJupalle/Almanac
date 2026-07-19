@@ -66,6 +66,7 @@ type ProposalRef = { id: number; kind: string; state: string };
 
 type PlanItem = {
   rank: number;
+  itemKey: string;
   title: string;
   kind: string;
   section: "do now" | "by EOD" | "can wait";
@@ -179,6 +180,29 @@ function App() {
       setReplanning(false);
     }
   }, [loadProposals]);
+
+  // Phase 3.2: snooze / complete / dismiss a plan item (audited). Returns the
+  // fresh, filtered plan so the item leaves the active list immediately.
+  const setItemState = useCallback(
+    async (
+      itemKey: string,
+      status: "snoozed" | "done" | "dismissed",
+      snoozeHours?: number,
+    ) => {
+      setError(null);
+      try {
+        const fresh = await invoke<Plan>("set_plan_item_state", {
+          itemKey,
+          status,
+          snoozeHours: snoozeHours ?? null,
+        });
+        setPlan(fresh);
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [],
+  );
 
   const decide = useCallback(
     async (id: number, action: "approve" | "reject" | "execute") => {
@@ -459,6 +483,33 @@ function App() {
                           <span className="plan-kind">{i.kind}</span>
                           <span className="plan-score" title="priority score">
                             {i.score}
+                          </span>
+                          <span className="plan-item-actions">
+                            <button
+                              className="item-state snooze"
+                              title="Snooze until tomorrow"
+                              onClick={() =>
+                                setItemState(i.itemKey, "snoozed", 24)
+                              }
+                            >
+                              Snooze
+                            </button>
+                            <button
+                              className="item-state done"
+                              title="Mark done — remove from the plan"
+                              onClick={() => setItemState(i.itemKey, "done")}
+                            >
+                              Done
+                            </button>
+                            <button
+                              className="item-state dismiss"
+                              title="Dismiss — not on my radar"
+                              onClick={() =>
+                                setItemState(i.itemKey, "dismissed")
+                              }
+                            >
+                              Dismiss
+                            </button>
                           </span>
                         </div>
                         <div className="plan-factors" aria-label="Factor breakdown">

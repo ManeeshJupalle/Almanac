@@ -715,6 +715,25 @@ body {
   cursor: help;
 }
 
+/* Phase 3.2: per-item snooze / done / dismiss controls. */
+.plan-item-actions {
+  display: inline-flex;
+  gap: 0.3rem;
+  margin-left: auto;
+}
+.item-state {
+  font-size: 0.56rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.item-state:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
 /* Phase 3.1: a plan item's linked proposal(s) + inline approve/execute. */
 .plan-proposals {
   display: flex;

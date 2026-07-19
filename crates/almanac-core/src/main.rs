@@ -609,8 +609,10 @@ fn plan_cmd() -> Result<()> {
     let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
     let now = Utc::now();
     let candidates = almanac_core::plan::load_candidates(&conn, now)?;
+    let states = almanac_core::plan::load_item_states(&conn)?;
+    let active = almanac_core::plan::active_candidates(candidates, &states, now);
     let config = almanac_core::plan::PriorityConfig::from_env();
-    let plan = almanac_core::plan::prioritize(&candidates, &config, now);
+    let plan = almanac_core::plan::prioritize(&active, &config, now);
     let links = almanac_core::plan::link_proposals(&conn, &plan)?;
     print_plan(&plan, &links);
     Ok(())
