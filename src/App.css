@@ -715,6 +715,77 @@ body {
   cursor: help;
 }
 
+/* Phase 3.6.1: audit-log viewer. */
+.audit {
+  margin-top: 1.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+}
+.audit-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.9rem;
+  margin-bottom: 0.6rem;
+}
+.audit-verify {
+  font-size: 0.6rem;
+  font-family: var(--font-mono);
+}
+.audit-verify.ok {
+  color: #4f7a3a;
+}
+.audit-verify.broken {
+  color: #a6492e;
+}
+.audit-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+.audit-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--muted);
+  padding: 0.15rem 0;
+  border-bottom: 1px dotted var(--rule);
+}
+.audit-seq {
+  color: var(--ink);
+}
+.audit-event {
+  color: var(--ink);
+  min-width: 9rem;
+}
+.audit-ts {
+  margin-left: auto;
+}
+.audit-hash {
+  color: var(--rule);
+}
+.audit-toggle {
+  margin-left: 0.6rem;
+  font-size: 0.6rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.audit-toggle:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
 /* Phase 3.4: learned-weighting panel. */
 .learning {
   margin: 0.4rem 0 0.7rem;

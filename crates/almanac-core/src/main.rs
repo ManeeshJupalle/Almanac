@@ -35,6 +35,8 @@ fn main() -> ExitCode {
         })(),
         Some("slack-permalink") => block_on(slack_permalink(args.get(1).cloned(), args.get(2).cloned())),
         Some("verify-chain") => verify_chain(),
+        // Phase 3.6.1: browse the hash-chained audit log (read-only).
+        Some("audit-log") => audit_log_cmd(args.get(1).and_then(|n| n.parse().ok())),
         Some("list-proposals") => list_proposals(),
         // Dev-only seed path (Phase 2.0): builds a test proposal from a REAL
         // stored source object. Correlation (Phase 2.2) is the production
@@ -97,6 +99,7 @@ fn main() -> ExitCode {
                  \n\
                  Action layer (Phase 2.0/2.1):\n\
                  \x20 verify-chain             walk + verify the hash-chained audit log\n\
+                 \x20 audit-log [N]            browse the last N audit records (default 50)\n\
                  \x20 list-proposals           approval queue + audit tail (local console)\n\
                  \x20 fetch-jira               fetch + store recent Jira issues (source objects)\n\
                  \n\
@@ -760,6 +763,22 @@ fn verify_chain() -> Result<()> {
         "audit chain OK — {} record(s) verified (genesis .. seq {}), head hash {}",
         report.records, report.head_seq, report.head_hash
     );
+    Ok(())
+}
+
+/// Phase 3.6.1: browse the hash-chained audit log — the live chain status plus
+/// the most recent records (read-only; distinct from `verify-chain`).
+fn audit_log_cmd(limit: Option<usize>) -> Result<()> {
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    match almanac_core::act::audit::verify_chain(&conn) {
+        Ok(r) => println!("chain intact — {} record(s), head seq {}", r.records, r.head_seq),
+        Err(e) => println!("CHAIN BROKEN — {}", first_line(&e)),
+    }
+    let records = almanac_core::act::audit::tail(&conn, limit.unwrap_or(50))?;
+    for r in &records {
+        let pid = r.proposal_id.map(|i| format!(" #{i}")).unwrap_or_default();
+        println!("  seq {:>3} [{}] {} · {}{}", r.seq, r.ts, r.actor, r.event, pid);
+    }
     Ok(())
 }
 

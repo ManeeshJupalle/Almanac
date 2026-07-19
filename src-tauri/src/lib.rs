@@ -346,6 +346,58 @@ fn verify_audit_chain() -> Result<String, String> {
     inner().map_err(|e| format!("{e:#}"))
 }
 
+// -------------------------------------------- audit-log viewer (3.6.1) -----
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditRecordView {
+    pub seq: i64,
+    pub ts: String,
+    pub actor: String,
+    pub event: String,
+    pub proposal_id: Option<i64>,
+    /// Short fingerprint of the chained record hash (browse, not verify).
+    pub record_hash: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditLogView {
+    /// Whether the chain recomputes intact right now.
+    pub verified: bool,
+    pub status: String,
+    /// Most-recent-first records.
+    pub records: Vec<AuditRecordView>,
+}
+
+/// Browse the hash-chained audit log (3.6.1) — READ ONLY. Surfaces the live
+/// chain-intact status plus the most recent records, so the log can be inspected,
+/// not just verified.
+#[tauri::command]
+fn get_audit_log(limit: Option<usize>) -> Result<AuditLogView, String> {
+    let inner = || -> anyhow::Result<AuditLogView> {
+        let path = almanac_core::init_default_db()?;
+        let conn = almanac_core::db::open(&path)?;
+        let (verified, status) = match almanac_core::act::audit::verify_chain(&conn) {
+            Ok(r) => (true, format!("chain intact — {} records (head seq {})", r.records, r.head_seq)),
+            Err(e) => (false, format!("CHAIN BROKEN — {e:#}")),
+        };
+        let records = almanac_core::act::audit::tail(&conn, limit.unwrap_or(100))?
+            .into_iter()
+            .map(|r| AuditRecordView {
+                seq: r.seq,
+                ts: r.ts,
+                actor: r.actor,
+                event: r.event,
+                proposal_id: r.proposal_id,
+                record_hash: r.record_hash.chars().take(12).collect(),
+            })
+            .collect();
+        Ok(AuditLogView { verified, status, records })
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
 // ---------------------------------------------- prioritized plan (2.3) -----
 
 #[derive(Serialize, Clone)]
@@ -640,7 +692,8 @@ pub fn run() {
             replan,
             set_plan_item_state,
             get_learning,
-            set_learning_enabled
+            set_learning_enabled,
+            get_audit_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

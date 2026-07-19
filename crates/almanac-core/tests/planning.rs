@@ -626,6 +626,23 @@ fn outcome_evidence_must_be_a_stored_source_object() {
     assert!(r.is_err(), "E2: closing evidence must FK-resolve to a stored source object");
 }
 
+// ------------------------------------------------- audit viewer (3.6.1) ----
+
+#[test]
+fn audit_tail_surfaces_recent_events_newest_first() {
+    let (_d, mut conn) = test_db();
+    seed_full_triple(&conn);
+    plan::set_item_state(&mut conn, "thread:ALM-3", Some(plan::ItemStatus::Dismissed), None, "user", "x", Utc::now())
+        .unwrap();
+    plan::replan_cycle(&mut conn, &PriorityConfig::default(), None, "user", "manual", Utc::now()).unwrap();
+
+    let tail = audit::tail(&conn, 50).unwrap();
+    let events: Vec<&str> = tail.iter().map(|r| r.event.as_str()).collect();
+    assert!(events.contains(&"plan_item_dismissed"), "the dismissal is browsable");
+    assert!(events.contains(&"replanned"), "the re-plan cycle is browsable");
+    assert!(tail.windows(2).all(|w| w[0].seq > w[1].seq), "records are newest-first");
+}
+
 fn audit_events(conn: &Connection) -> Vec<String> {
     let mut stmt = conn.prepare("SELECT event FROM audit_records ORDER BY seq ASC").unwrap();
     stmt.query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()

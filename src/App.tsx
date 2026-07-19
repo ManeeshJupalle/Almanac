@@ -93,6 +93,17 @@ type LearnedWeight = {
 
 type Learning = { enabled: boolean; adjustments: LearnedWeight[] };
 
+type AuditRecord = {
+  seq: number;
+  ts: string;
+  actor: string;
+  event: string;
+  proposalId: number | null;
+  recordHash: string;
+};
+
+type AuditLog = { verified: boolean; status: string; records: AuditRecord[] };
+
 const PROPOSAL_KIND_LABEL: Record<Proposal["kind"], string> = {
   gmail_reply: "Gmail reply",
   slack_post: "Slack post",
@@ -129,6 +140,8 @@ function App() {
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [chainStatus, setChainStatus] = useState<string | null>(null);
+  const [auditLog, setAuditLog] = useState<AuditLog | null>(null);
+  const [showAudit, setShowAudit] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [replanning, setReplanning] = useState(false);
   const [learning, setLearning] = useState<Learning | null>(null);
@@ -238,6 +251,20 @@ function App() {
     },
     [],
   );
+
+  // Phase 3.6.1: browse the hash-chained audit log (read-only), fetched on demand.
+  const toggleAudit = useCallback(async () => {
+    if (showAudit) {
+      setShowAudit(false);
+      return;
+    }
+    try {
+      setAuditLog(await invoke<AuditLog>("get_audit_log", { limit: 100 }));
+      setShowAudit(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [showAudit]);
 
   const decide = useCallback(
     async (id: number, action: "approve" | "reject" | "execute") => {
@@ -743,12 +770,45 @@ function App() {
             </ul>
           </section>
         )}
+        {showAudit && auditLog && (
+          <section className="audit" aria-label="Audit log">
+            <h2 className="audit-head">
+              Audit log
+              <span
+                className={`audit-verify ${auditLog.verified ? "ok" : "broken"}`}
+              >
+                {auditLog.status}
+              </span>
+            </h2>
+            <ul className="audit-list">
+              {auditLog.records.map((r) => (
+                <li key={r.seq} className="audit-item">
+                  <span className="audit-seq">#{r.seq}</span>
+                  <span className="audit-event">{r.event}</span>
+                  <span className="audit-actor">{r.actor}</span>
+                  {r.proposalId !== null && (
+                    <span className="audit-pid">proposal {r.proposalId}</span>
+                  )}
+                  <span className="audit-ts">
+                    {new Date(r.ts).toLocaleString()}
+                  </span>
+                  <span className="audit-hash" title="record hash">
+                    {r.recordHash}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </main>
 
       <footer className="colophon">
         Every briefed item links back to the exact message or event it came
         from. Raw content never leaves this machine.
         {chainStatus && <span className="chain-status"> · {chainStatus}</span>}
+        <button className="audit-toggle" onClick={toggleAudit}>
+          {showAudit ? "hide audit log" : "view audit log"}
+        </button>
       </footer>
     </div>
   );
