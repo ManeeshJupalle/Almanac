@@ -60,6 +60,8 @@ fn main() -> ExitCode {
         Some("learning") => learning_cmd(),
         // Phase 3.5: reconcile outcomes (close loops that resolved) and show them.
         Some("outcomes") => outcomes_cmd(),
+        // Phase 3.6.2: list closed items (done / dismissed / resolved), read-only.
+        Some("closed") => closed_cmd(),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
             println!(
@@ -113,6 +115,7 @@ fn main() -> ExitCode {
                  \x20 decisions                show the captured decision log (factors at decision time)\n\
                  \x20 learning                 show what the ranker learned from your decisions\n\
                  \x20 outcomes                 reconcile + show resolved loops (closing evidence)\n\
+                 \x20 closed                   list closed items (done / dismissed / resolved)\n\
                  \x20 debug-seed-proposal <gmail-ack|slack-check|jira-comment|jira-transition> [native_id]\n\
                  \x20                          DEV-ONLY: seed a test proposal from a stored\n\
                  \x20                          source object (correlation arrives in 2.2)\n\
@@ -664,6 +667,23 @@ fn outcomes_cmd() -> Result<()> {
     println!("{} resolved item(s):", outcomes.len());
     for o in &outcomes {
         println!("  {} — {} (evidence {}:{}) @ {}", o.item_key, o.detail, o.evidence_source, o.evidence_native_id, o.resolved_at);
+    }
+    Ok(())
+}
+
+/// Phase 3.6.2: list closed items — user-dismissed / done, or system-resolved
+/// (with the closing evidence). Read-only; reopen is a UI/`set-item-state` action.
+fn closed_cmd() -> Result<()> {
+    let conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let items = almanac_core::plan::load_closed_items(&conn, Utc::now())?;
+    println!("{} closed item(s):", items.len());
+    for c in &items {
+        let tag = if c.resolved {
+            format!("resolved (evidence {})", c.evidence.as_deref().unwrap_or("-"))
+        } else {
+            c.status.clone()
+        };
+        println!("  {} [{}] — {}", c.title, tag, c.updated_at);
     }
     Ok(())
 }

@@ -86,8 +86,13 @@ fn seed_executed_triple(conn: &mut Connection, key: &str, status_category: &str)
     store_git_commit(conn, &sha, &format!("{key}: fix"));
     store_jira_issue_with_status(conn, key, status_category);
     store_gmail_ask(conn, &format!("m-{key}"), key);
-    let pid = queue(conn).ids[0];
-    conn.execute("UPDATE action_proposals SET state = 'executed' WHERE id = ?1", [pid]).unwrap();
+    queue(conn);
+    // Mark exactly THIS issue's proposal executed (robust when other threads exist).
+    conn.execute(
+        "UPDATE action_proposals SET state = 'executed' WHERE correlation_key LIKE ?1",
+        [format!("%|{key}")],
+    )
+    .unwrap();
 }
 
 fn store_gmail_ask(conn: &Connection, nid: &str, subject: &str) {
@@ -624,6 +629,48 @@ fn outcome_evidence_must_be_a_stored_source_object() {
         [],
     );
     assert!(r.is_err(), "E2: closing evidence must FK-resolve to a stored source object");
+}
+
+// --------------------------------------- completed & dismissed (3.6.2) -----
+
+#[test]
+fn closed_items_list_status_and_evidence() {
+    let (_d, mut conn) = test_db();
+    let now = Utc::now();
+    // A user-dismissed item.
+    seed_full_triple(&conn);
+    plan::set_item_state(&mut conn, "thread:ALM-3", Some(plan::ItemStatus::Dismissed), None, "user", "x", now)
+        .unwrap();
+    // A system-resolved item.
+    seed_executed_triple(&mut conn, "ALM-7", "done");
+    plan::detect_and_record_outcomes(&mut conn, "system", now).unwrap();
+
+    let closed = plan::load_closed_items(&conn, now).unwrap();
+    let dismissed = closed.iter().find(|c| c.item_key == "thread:ALM-3").unwrap();
+    assert_eq!(dismissed.status, "dismissed");
+    assert!(!dismissed.resolved);
+    assert!(dismissed.title.contains("ALM-3"), "the title is resolved, not just the key");
+
+    let resolved = closed.iter().find(|c| c.item_key == "thread:ALM-7").unwrap();
+    assert!(resolved.resolved, "a system-closed item is marked resolved");
+    assert_eq!(resolved.evidence.as_deref(), Some("jira:ALM-7"), "its closing evidence is shown");
+}
+
+#[test]
+fn reopen_removes_item_from_closed_list_and_is_audited() {
+    let (_d, mut conn) = test_db();
+    seed_full_triple(&conn);
+    let now = Utc::now();
+    plan::set_item_state(&mut conn, "thread:ALM-3", Some(plan::ItemStatus::Done), None, "user", "x", now)
+        .unwrap();
+    assert!(plan::load_closed_items(&conn, now).unwrap().iter().any(|c| c.item_key == "thread:ALM-3"));
+
+    // Reopen through the audited path.
+    plan::set_item_state(&mut conn, "thread:ALM-3", None, None, "user", "undo", now).unwrap();
+    assert!(plan::load_closed_items(&conn, now).unwrap().is_empty(), "reopened item leaves the closed list");
+    assert!(in_plan(&conn, now, "thread:ALM-3"), "reopened item is back in the plan");
+    assert!(audit_events(&conn).iter().any(|e| e == "plan_item_reopened"), "reopen is on the chain");
+    audit::verify_chain(&conn).unwrap();
 }
 
 // ------------------------------------------------- audit viewer (3.6.1) ----

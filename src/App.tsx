@@ -104,6 +104,16 @@ type AuditRecord = {
 
 type AuditLog = { verified: boolean; status: string; records: AuditRecord[] };
 
+type ClosedItem = {
+  itemKey: string;
+  title: string;
+  status: string;
+  updatedAt: string;
+  resolved: boolean;
+  evidence: string | null;
+  detail: string | null;
+};
+
 const PROPOSAL_KIND_LABEL: Record<Proposal["kind"], string> = {
   gmail_reply: "Gmail reply",
   slack_post: "Slack post",
@@ -142,6 +152,7 @@ function App() {
   const [chainStatus, setChainStatus] = useState<string | null>(null);
   const [auditLog, setAuditLog] = useState<AuditLog | null>(null);
   const [showAudit, setShowAudit] = useState(false);
+  const [closedItems, setClosedItems] = useState<ClosedItem[]>([]);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [replanning, setReplanning] = useState(false);
   const [learning, setLearning] = useState<Learning | null>(null);
@@ -164,12 +175,14 @@ function App() {
   // ignore failure so the primary panels are never blanked out.
   const loadPlan = useCallback(async () => {
     try {
-      const [thePlan, theLearning] = await Promise.all([
+      const [thePlan, theLearning, closed] = await Promise.all([
         invoke<Plan>("get_plan"),
         invoke<Learning>("get_learning").catch(() => null),
+        invoke<ClosedItem[]>("get_closed_items").catch(() => null),
       ]);
       setPlan(thePlan);
       if (theLearning) setLearning(theLearning);
+      if (closed) setClosedItems(closed);
     } catch {
       /* plan is a secondary panel; its refresh failure must not surface */
     }
@@ -177,18 +190,20 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, stored, thePlan, theLearning] = await Promise.all([
+      const [status, stored, thePlan, theLearning, closed] = await Promise.all([
         invoke<SourceStatus[]>("get_connection_status"),
         invoke<Briefing | null>("get_briefing"),
-        // The plan/learning are secondary panels: a failure here must not blank
-        // out the connection status and briefing, so each settles to null.
+        // The plan/learning/closed are secondary panels: a failure here must not
+        // blank out the connection status and briefing, so each settles to null.
         invoke<Plan>("get_plan").catch(() => null),
         invoke<Learning>("get_learning").catch(() => null),
+        invoke<ClosedItem[]>("get_closed_items").catch(() => null),
       ]);
       setStatuses(status);
       setBriefing(stored);
       setPlan(thePlan);
       setLearning(theLearning);
+      if (closed) setClosedItems(closed);
       await loadProposals();
     } catch (e) {
       setError(String(e));
@@ -265,6 +280,27 @@ function App() {
       setError(String(e));
     }
   }, [showAudit]);
+
+  // Phase 3.6.2: undo — reopen a closed item through the existing audited path.
+  const reopen = useCallback(
+    async (itemKey: string) => {
+      setError(null);
+      try {
+        const fresh = await invoke<Plan>("set_plan_item_state", {
+          itemKey,
+          status: "open",
+          snoozeHours: null,
+        });
+        setPlan(fresh);
+        setClosedItems(
+          await invoke<ClosedItem[]>("get_closed_items").catch(() => []),
+        );
+      } catch (e) {
+        setError(String(e));
+      }
+    },
+    [],
+  );
 
   const decide = useCallback(
     async (id: number, action: "approve" | "reject" | "execute") => {
@@ -770,6 +806,34 @@ function App() {
             </ul>
           </section>
         )}
+        {!loading && closedItems.length > 0 && (
+          <section className="closed" aria-label="Completed and dismissed">
+            <h2 className="closed-head">Completed &amp; dismissed</h2>
+            <ul className="closed-list">
+              {closedItems.map((c) => (
+                <li key={c.itemKey} className="closed-item">
+                  <span className={`closed-badge badge-${c.status}`}>
+                    {c.resolved ? "resolved" : c.status}
+                  </span>
+                  <span className="closed-title">{c.title}</span>
+                  {c.evidence && (
+                    <span className="closed-evidence" title={c.detail ?? ""}>
+                      ✓ {c.evidence}
+                    </span>
+                  )}
+                  <button
+                    className="closed-reopen"
+                    onClick={() => reopen(c.itemKey)}
+                    title="Reopen — return this item to the plan (audited)."
+                  >
+                    Reopen
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         {showAudit && auditLog && (
           <section className="audit" aria-label="Audit log">
             <h2 className="audit-head">

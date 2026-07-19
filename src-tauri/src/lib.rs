@@ -559,6 +559,45 @@ fn set_plan_item_state(
     inner().map_err(|e| format!("{e:#}"))
 }
 
+// ---------------------------------------- completed & dismissed (3.6.2) ----
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedItemView {
+    pub item_key: String,
+    pub title: String,
+    pub status: String,
+    pub updated_at: String,
+    pub resolved: bool,
+    pub evidence: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Items the user or the system has closed (3.6.2) — READ ONLY. Each carries its
+/// status and, when system-resolved, the closing evidence. Reopen goes through
+/// the existing audited `set_plan_item_state` with status "open".
+#[tauri::command]
+fn get_closed_items() -> Result<Vec<ClosedItemView>, String> {
+    let inner = || -> anyhow::Result<Vec<ClosedItemView>> {
+        let path = almanac_core::init_default_db()?;
+        let conn = almanac_core::db::open(&path)?;
+        let items = almanac_core::plan::load_closed_items(&conn, chrono::Utc::now())?
+            .into_iter()
+            .map(|c| ClosedItemView {
+                item_key: c.item_key,
+                title: c.title,
+                status: c.status,
+                updated_at: c.updated_at,
+                resolved: c.resolved,
+                evidence: c.evidence,
+                detail: c.detail,
+            })
+            .collect();
+        Ok(items)
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
 /// A triggered re-plan cycle (the "Refresh plan" button): idempotently queue
 /// proposals + re-rank + append a traceable audit record (actor = the human who
 /// clicked). Offline (no external writes). J15 self-comment exclusion uses the
@@ -693,7 +732,8 @@ pub fn run() {
             set_plan_item_state,
             get_learning,
             set_learning_enabled,
-            get_audit_log
+            get_audit_log,
+            get_closed_items
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

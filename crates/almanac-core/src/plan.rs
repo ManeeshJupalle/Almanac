@@ -951,6 +951,66 @@ pub fn load_outcomes(conn: &Connection) -> Result<Vec<Outcome>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// A closed plan item — user-dismissed / marked-done, or system-resolved.
+#[derive(Debug, Clone)]
+pub struct ClosedItem {
+    pub item_key: String,
+    pub title: String,
+    /// "done" | "dismissed".
+    pub status: String,
+    pub updated_at: String,
+    /// True when a system outcome closed it (evidence present).
+    pub resolved: bool,
+    /// `<source>:<native_id>` of the closing evidence, when system-resolved.
+    pub evidence: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// Items the user or the system has closed (done / dismissed), most recent first
+/// (3.6.2). Joins `plan_item_state` with any recorded outcome so a system close
+/// shows its evidence. Titles come from the current candidate set (falling back
+/// to the key when the underlying data is gone). Read-only.
+pub fn load_closed_items(conn: &Connection, now: DateTime<Utc>) -> Result<Vec<ClosedItem>> {
+    let titles: HashMap<String, String> =
+        load_candidates(conn, now)?.into_iter().map(|c| (c.key, c.title)).collect();
+    let mut stmt = conn.prepare(
+        "SELECT s.item_key, s.status, s.updated_at, o.evidence_source, o.evidence_native_id, o.detail
+         FROM plan_item_state s
+         LEFT JOIN item_outcomes o ON o.item_key = s.item_key
+         WHERE s.status IN ('done', 'dismissed')
+         ORDER BY s.updated_at DESC, s.item_key ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, Option<String>>(4)?,
+            r.get::<_, Option<String>>(5)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (item_key, status, updated_at, ev_source, ev_native, detail) = row?;
+        let evidence = match (&ev_source, &ev_native) {
+            (Some(s), Some(n)) => Some(format!("{s}:{n}")),
+            _ => None,
+        };
+        let title = titles.get(&item_key).cloned().unwrap_or_else(|| item_key.clone());
+        out.push(ClosedItem {
+            item_key,
+            title,
+            status,
+            updated_at,
+            resolved: ev_source.is_some(),
+            evidence,
+            detail,
+        });
+    }
+    Ok(out)
+}
+
 fn asker_of(source: SourceId, raw_json: &str) -> Option<String> {
     let raw: Value = serde_json::from_str(raw_json).ok()?;
     match source {

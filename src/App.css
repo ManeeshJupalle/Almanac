@@ -715,6 +715,67 @@ body {
   cursor: help;
 }
 
+/* Phase 3.6.2: completed & dismissed view + reopen. */
+.closed {
+  margin-top: 1.4rem;
+}
+.closed-head {
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+}
+.closed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.closed-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px dotted var(--rule);
+}
+.closed-badge {
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--rule);
+  color: var(--muted);
+}
+.badge-done {
+  color: #4f7a3a;
+  border-color: #4f7a3a;
+}
+.badge-dismissed {
+  color: var(--muted);
+}
+.closed-title {
+  color: var(--ink);
+}
+.closed-evidence {
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  color: #4f7a3a;
+}
+.closed-reopen {
+  margin-left: auto;
+  font-size: 0.56rem;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.closed-reopen:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
 /* Phase 3.6.1: audit-log viewer. */
 .audit {
   margin-top: 1.4rem;
