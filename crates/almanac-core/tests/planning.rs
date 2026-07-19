@@ -53,6 +53,43 @@ fn store_jira_issue(conn: &Connection, key: &str) {
     almanac_core::db::insert_source_object(conn, &obj).unwrap();
 }
 
+/// A Jira issue with an explicit status category ("done" / "indeterminate" / …).
+fn store_jira_issue_with_status(conn: &Connection, key: &str, status_category: &str) {
+    let obj = SourceObject {
+        provenance: ProvenanceRef {
+            source: SourceId::Jira,
+            native_id: key.to_string(),
+            deep_link: format!("https://x.atlassian.net/browse/{key}"),
+        },
+        raw: RawContent::new(json!({
+            "key": key,
+            "fields": {
+                "summary": "Timezone bug",
+                "status": { "statusCategory": { "key": status_category } },
+                "comment": { "comments": [] }
+            }
+        })),
+        occurred_at: Utc::now() - Duration::hours(3),
+    };
+    almanac_core::db::insert_source_object(conn, &obj).unwrap();
+}
+
+/// Full triple whose Jira issue carries the given status category, and mark its
+/// queued proposal executed (simulating that we already replied). Returns the key.
+fn hex_sha(key: &str) -> String {
+    let hex: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("{hex:0<40}").chars().take(40).collect() // 40 hex chars, unique per key
+}
+
+fn seed_executed_triple(conn: &mut Connection, key: &str, status_category: &str) {
+    let sha = hex_sha(key);
+    store_git_commit(conn, &sha, &format!("{key}: fix"));
+    store_jira_issue_with_status(conn, key, status_category);
+    store_gmail_ask(conn, &format!("m-{key}"), key);
+    let pid = queue(conn).ids[0];
+    conn.execute("UPDATE action_proposals SET state = 'executed' WHERE id = ?1", [pid]).unwrap();
+}
+
 fn store_gmail_ask(conn: &Connection, nid: &str, subject: &str) {
     let obj = SourceObject {
         provenance: ProvenanceRef {
@@ -517,6 +554,76 @@ fn learned_downweight_lowers_the_score_but_stays_deterministic() {
     let s2 = s(&cfg);
     assert!(s1 < base_score, "downweighting actionability lowers the score ({s1} < {base_score})");
     assert_eq!(s1, s2, "same weights + inputs → same score (deterministic)");
+}
+
+// ------------------------------------------------ outcome tracking (3.5) ---
+
+#[test]
+fn executed_action_whose_issue_resolves_closes_the_loop() {
+    let (_d, mut conn) = test_db();
+    seed_executed_triple(&mut conn, "ALM-3", "done");
+
+    let closed = plan::detect_and_record_outcomes(&mut conn, "system", Utc::now()).unwrap();
+    assert_eq!(closed, vec!["thread:ALM-3".to_string()], "the loop closes");
+
+    let outcomes = plan::load_outcomes(&conn).unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].item_key, "thread:ALM-3");
+    assert_eq!(outcomes[0].evidence_source, "jira");
+    assert_eq!(outcomes[0].evidence_native_id, "ALM-3", "the closing issue is the evidence");
+
+    // Audited (L1) + chain intact.
+    assert!(audit_events(&conn).iter().any(|e| e == "item_resolved"));
+    audit::verify_chain(&conn).unwrap();
+
+    // Retired from the active plan.
+    assert!(!in_plan(&conn, Utc::now(), "thread:ALM-3"), "a resolved item leaves the plan");
+}
+
+#[test]
+fn outcome_detection_is_idempotent() {
+    let (_d, mut conn) = test_db();
+    seed_executed_triple(&mut conn, "ALM-3", "done");
+
+    assert_eq!(plan::detect_and_record_outcomes(&mut conn, "system", Utc::now()).unwrap().len(), 1);
+    let second = plan::detect_and_record_outcomes(&mut conn, "system", Utc::now()).unwrap();
+    assert!(second.is_empty(), "an already-closed loop is not re-closed");
+    assert_eq!(plan::load_outcomes(&conn).unwrap().len(), 1);
+}
+
+#[test]
+fn unacted_item_does_not_auto_close() {
+    let (_d, mut conn) = test_db();
+    // Issue is Done, but the proposal was never executed (still 'proposed').
+    store_git_commit(&conn, &hex_sha("ALM-3"), "ALM-3: fix");
+    store_jira_issue_with_status(&conn, "ALM-3", "done");
+    store_gmail_ask(&conn, "m-ALM-3", "ALM-3");
+    queue(&mut conn);
+
+    let closed = plan::detect_and_record_outcomes(&mut conn, "system", Utc::now()).unwrap();
+    assert!(closed.is_empty(), "an item we never acted on does not auto-close");
+}
+
+#[test]
+fn executed_but_unresolved_item_does_not_close() {
+    let (_d, mut conn) = test_db();
+    seed_executed_triple(&mut conn, "ALM-4", "indeterminate"); // still in progress
+
+    let closed = plan::detect_and_record_outcomes(&mut conn, "system", Utc::now()).unwrap();
+    assert!(closed.is_empty(), "an executed action whose issue is still open does not close");
+}
+
+#[test]
+fn outcome_evidence_must_be_a_stored_source_object() {
+    let (_d, conn) = test_db();
+    // Directly inserting an outcome whose evidence is not a stored source object
+    // must fail — E2 enforced at rest by the composite FK.
+    let r = conn.execute(
+        "INSERT INTO item_outcomes (item_key, resolved_at, evidence_source, evidence_native_id, detail)
+         VALUES ('thread:ALM-9', '2026-07-18T00:00:00+00:00', 'jira', 'ALM-9', 'x')",
+        [],
+    );
+    assert!(r.is_err(), "E2: closing evidence must FK-resolve to a stored source object");
 }
 
 fn audit_events(conn: &Connection) -> Vec<String> {

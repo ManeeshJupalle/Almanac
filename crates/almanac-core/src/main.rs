@@ -56,6 +56,8 @@ fn main() -> ExitCode {
         Some("decisions") => decisions_cmd(),
         // Phase 3.4: what the ranker has learned from your decisions (read-only).
         Some("learning") => learning_cmd(),
+        // Phase 3.5: reconcile outcomes (close loops that resolved) and show them.
+        Some("outcomes") => outcomes_cmd(),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
             println!(
@@ -107,6 +109,7 @@ fn main() -> ExitCode {
                  \x20 replan [reason]          run one audited re-plan cycle (idempotent queueing)\n\
                  \x20 decisions                show the captured decision log (factors at decision time)\n\
                  \x20 learning                 show what the ranker learned from your decisions\n\
+                 \x20 outcomes                 reconcile + show resolved loops (closing evidence)\n\
                  \x20 debug-seed-proposal <gmail-ack|slack-check|jira-comment|jira-transition> [native_id]\n\
                  \x20                          DEV-ONLY: seed a test proposal from a stored\n\
                  \x20                          source object (correlation arrives in 2.2)\n\
@@ -641,6 +644,23 @@ fn decisions_cmd() -> Result<()> {
             })
             .collect();
         println!("  [{}] {} · {} — {}", d.occurred_at, d.decision, d.item_key, factors.join(", "));
+    }
+    Ok(())
+}
+
+/// Phase 3.5: reconcile outcomes — close any loop we acted on whose work has
+/// since resolved (read-only w.r.t. external services; the close is audited) —
+/// then show every recorded outcome with its closing evidence.
+fn outcomes_cmd() -> Result<()> {
+    let mut conn = almanac_core::db::open(&almanac_core::init_default_db()?)?;
+    let closed = almanac_core::plan::detect_and_record_outcomes(&mut conn, "system", Utc::now())?;
+    if !closed.is_empty() {
+        println!("closed {} loop(s) this run: {}", closed.len(), closed.join(", "));
+    }
+    let outcomes = almanac_core::plan::load_outcomes(&conn)?;
+    println!("{} resolved item(s):", outcomes.len());
+    for o in &outcomes {
+        println!("  {} — {} (evidence {}:{}) @ {}", o.item_key, o.detail, o.evidence_source, o.evidence_native_id, o.resolved_at);
     }
     Ok(())
 }

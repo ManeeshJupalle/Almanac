@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::act::draft::TemplatedDraftingBackend;
@@ -831,6 +831,126 @@ pub fn effective_config(conn: &Connection) -> Result<PriorityConfig> {
     Ok(config)
 }
 
+// ------------------------------------------------ outcome tracking (3.5) ---
+
+/// A resolved plan item and the stored evidence that closed it.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    pub item_key: String,
+    pub resolved_at: String,
+    pub evidence_source: String,
+    pub evidence_native_id: String,
+    pub detail: String,
+}
+
+/// Jira's own "this is resolved" signal: `fields.status.statusCategory.key`
+/// == `"done"` (its coarse category, stable across custom workflow names).
+fn issue_status_is_done(raw_json: &str) -> bool {
+    serde_json::from_str::<Value>(raw_json)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/fields/status/statusCategory/key").and_then(Value::as_str).map(|k| k == "done")
+        })
+        .unwrap_or(false)
+}
+
+/// Close the loop (3.5): for each work item we ACTED on (an executed correlation
+/// proposal) whose stored Jira issue now sits in a "done" status category, record
+/// an audited outcome with that issue as closing evidence and retire the item
+/// from the plan. Read-only w.r.t. external services — it reads already-stored
+/// source objects; the only writes are the audited local close. Idempotent (one
+/// outcome per item). Returns the newly closed item keys (sorted, deterministic).
+pub fn detect_and_record_outcomes(
+    conn: &mut Connection,
+    actor: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<String>> {
+    // Issues with an EXECUTED correlation proposal — the ones whose loop we opened.
+    let mut acted: Vec<String> = crate::act::correlation_links(conn)?
+        .into_iter()
+        .filter(|l| l.state == crate::act::ProposalState::Executed)
+        .filter_map(|l| issue_of(&l.correlation_key).map(str::to_string))
+        .collect();
+    acted.sort();
+    acted.dedup();
+
+    let mut newly = Vec::new();
+    for issue in acted {
+        let item_key = format!("thread:{issue}");
+        let already: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM item_outcomes WHERE item_key = ?1",
+            [&item_key],
+            |r| r.get(0),
+        )?;
+        if already > 0 {
+            continue; // idempotent
+        }
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT raw_json FROM source_objects WHERE source = 'jira' AND native_id = ?1",
+                [&issue],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else { continue };
+        if !issue_status_is_done(&raw) {
+            continue;
+        }
+        record_outcome(conn, &item_key, "jira", &issue, "Jira issue reached a done status", actor, now)?;
+        newly.push(item_key);
+    }
+    Ok(newly)
+}
+
+/// Atomically: record the outcome (evidence FK-checked → E2), retire the item
+/// from the plan, and append the audited close (L1) — all or nothing.
+fn record_outcome(
+    conn: &mut Connection,
+    item_key: &str,
+    ev_source: &str,
+    ev_native_id: &str,
+    detail: &str,
+    actor: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "INSERT INTO item_outcomes (item_key, resolved_at, evidence_source, evidence_native_id, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        (item_key, now.to_rfc3339(), ev_source, ev_native_id, detail),
+    )
+    .context("recording outcome (an FK failure here means the closing evidence is not a stored source object)")?;
+    // Retire it from the active plan, reusing the terminal 'done' state.
+    tx.execute(
+        "INSERT INTO plan_item_state (item_key, status, snooze_until, updated_at)
+         VALUES (?1, 'done', NULL, ?2)
+         ON CONFLICT(item_key) DO UPDATE SET status = 'done', snooze_until = NULL, updated_at = excluded.updated_at",
+        (item_key, now.to_rfc3339()),
+    )?;
+    let summary = format!("item={item_key}; resolved_by={ev_source}:{ev_native_id}; {detail}");
+    crate::act::audit::append(&tx, actor, "item_resolved", None, &crate::act::audit::sha256_hex(summary.as_bytes()))?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// All recorded outcomes, most recent first (3.5).
+pub fn load_outcomes(conn: &Connection) -> Result<Vec<Outcome>> {
+    let mut stmt = conn.prepare(
+        "SELECT item_key, resolved_at, evidence_source, evidence_native_id, detail
+         FROM item_outcomes ORDER BY resolved_at DESC, item_key ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(Outcome {
+            item_key: r.get(0)?,
+            resolved_at: r.get(1)?,
+            evidence_source: r.get(2)?,
+            evidence_native_id: r.get(3)?,
+            detail: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 fn asker_of(source: SourceId, raw_json: &str) -> Option<String> {
     let raw: Value = serde_json::from_str(raw_json).ok()?;
     match source {
@@ -871,6 +991,10 @@ pub fn replan_cycle(
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<ReplanReport> {
+    // Reconcile outcomes first (3.5): any item we acted on that has since resolved
+    // is closed + retired here, so it drops out of the plan this cycle.
+    let closed = detect_and_record_outcomes(conn, "system", now)?;
+
     let asks = correlate::load_asks(conn)?;
     let items = correlate::load_work_items(conn)?;
     let commits = correlate::load_commits(conn)?;
@@ -894,7 +1018,8 @@ pub fn replan_cycle(
     let plan = prioritize(&active, config, now);
 
     let summary = format!(
-        "reason={reason}; queued={}; skipped_dup={}; ranked={}; top={}",
+        "reason={reason}; closed={}; queued={}; skipped_dup={}; ranked={}; top={}",
+        closed.len(),
         outcome.queued,
         outcome.skipped,
         plan.items.len(),
