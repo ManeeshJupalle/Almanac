@@ -204,22 +204,3 @@ pub fn ts_to_utc(ts: &str) -> Result<DateTime<Utc>> {
         .with_context(|| format!("bad ts fraction: {ts}"))?;
     DateTime::from_timestamp(secs, micros * 1000).with_context(|| format!("ts out of range: {ts}"))
 }
-
-/// S3: channel `created` is epoch SECONDS…
-pub fn channel_created_utc(channel: &Value) -> Result<DateTime<Utc>> {
-    let secs = channel
-        .get("created")
-        .and_then(Value::as_i64)
-        .context("channel missing created")?;
-    DateTime::from_timestamp(secs, 0).context("channel created out of range")
-}
-
-/// …while `updated` in the SAME object is epoch MILLISECONDS. Each converted
-/// explicitly; consumers must use these instead of guessing units.
-pub fn channel_updated_utc(channel: &Value) -> Result<DateTime<Utc>> {
-    let millis = channel
-        .get("updated")
-        .and_then(Value::as_i64)
-        .context("channel missing updated")?;
-    DateTime::from_timestamp_millis(millis).context("channel updated out of range")
-}

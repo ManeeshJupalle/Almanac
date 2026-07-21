@@ -56,13 +56,6 @@ pub enum DraftRequest {
     /// Fixed-text Slack check-in post — makes no claim about work done.
     /// (Used by the Phase 2.0 live gate and the dev seed path.)
     SlackCheckInPost,
-    /// Jira comment asserting completed work — E1: requires Tier-Hard evidence.
-    JiraWorkDoneComment {
-        ticket: String,
-        commit_short: String,
-        completed_at: DateTime<Utc>,
-        ci_link: Option<String>,
-    },
     /// Jira acknowledgement comment — makes no claim about work done.
     /// (Phase 2.1 dev seed uses this: no git evidence exists until Phase 2.2.)
     JiraAckComment,
@@ -210,22 +203,6 @@ impl DraftingBackend for TemplatedDraftingBackend {
                     .to_string(),
                 asserts_work_done: false,
             }),
-            DraftRequest::JiraWorkDoneComment { ticket, commit_short, completed_at, ci_link } => {
-                validate_ticket(ticket)?;
-                validate_commit_short(commit_short)?;
-                if let Some(l) = ci_link {
-                    validate_link(l)?;
-                }
-                let mut body = format!(
-                    "Done — {ticket} fixed in {commit_short} at {}.",
-                    format_time(*completed_at)
-                );
-                if let Some(l) = ci_link {
-                    body.push_str(&format!(" CI is green: {l}."));
-                }
-                // The executor wraps this text into ADF (J3); asserts work → E1.
-                Ok(Draft { subject: None, body, asserts_work_done: true })
-            }
             DraftRequest::JiraAckComment => Ok(Draft {
                 subject: None,
                 body: "Acknowledged — Almanac is tracking this; an update will follow.".to_string(),

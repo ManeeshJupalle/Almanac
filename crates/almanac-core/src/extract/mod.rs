@@ -142,10 +142,6 @@ impl Extractor {
         Self { embedder: None }
     }
 
-    pub fn has_model(&self) -> bool {
-        self.embedder.is_some()
-    }
-
     /// Classify one source object. Never drops anything: every input yields
     /// exactly one ExtractedItem (Noise is retained and flagged).
     pub fn extract_one(&self, obj: &SourceObject) -> Result<ExtractedItem> {

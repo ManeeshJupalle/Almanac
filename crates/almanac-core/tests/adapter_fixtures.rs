@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use almanac_core::adapters::{gcal, gmail, slack};
 use almanac_core::types::SourceId;
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 fn fixture(rel: &str) -> Value {
@@ -153,21 +153,6 @@ fn slack_pagination_terminates_both_ways() {
     // A real continuation cursor still flows through.
     let more = serde_json::json!({ "response_metadata": { "next_cursor": "dGVhbTpD" } });
     assert_eq!(slack::next_cursor(&more).as_deref(), Some("dGVhbTpD"));
-}
-
-#[test]
-fn slack_channel_created_and_updated_use_different_epoch_units() {
-    // S3: created = seconds, updated = milliseconds, same object. If either
-    // unit were guessed wrong the results would be millennia apart.
-    let list = fixture("slack/conversations_list.json");
-    let channel = &list.get("channels").and_then(Value::as_array).unwrap()[0];
-
-    let created = slack::channel_created_utc(channel).unwrap();
-    let updated = slack::channel_updated_utc(channel).unwrap();
-    assert_eq!(created.year(), 2026);
-    assert_eq!(updated.year(), 2026);
-    let drift = (updated - created).num_seconds();
-    assert!((0..3600).contains(&drift), "created/updated should be seconds apart, got {drift}s");
 }
 
 // ------------------------------------------------------------ provenance ----

@@ -854,42 +854,6 @@ async fn a1_jira_executors_refuse_proposed_and_rejected() {
 }
 
 #[test]
-fn e1_jira_work_done_comment_needs_hard_evidence() {
-    let (_d, conn) = test_db();
-    let issue = store_jira_issue(&conn, "ALM-1");
-    let workdone = TemplatedDraftingBackend
-        .draft(&DraftRequest::JiraWorkDoneComment {
-            ticket: "ALM-1".into(),
-            commit_short: "a1b2c3d".into(),
-            completed_at: "2026-07-14T15:00:00Z".parse().unwrap(),
-            ci_link: Some("https://ci.example.com/runs/9".into()),
-        })
-        .unwrap();
-    assert!(workdone.asserts_work_done);
-
-    // Soft-only evidence → refused (E1).
-    let err = ActionProposal::new(
-        ActionKind::JiraComment,
-        ActionTarget::JiraComment { issue_key: "ALM-1".into() },
-        workdone.clone(),
-        vec![soft_evidence()],
-        "templated-v1",
-    )
-    .unwrap_err();
-    assert!(matches!(err, ProposalViolation::SoftOnlyFactualClaim), "{err}");
-
-    // With the Jira issue (Tier-Hard) → constructs.
-    assert!(ActionProposal::new(
-        ActionKind::JiraComment,
-        ActionTarget::JiraComment { issue_key: "ALM-1".into() },
-        workdone,
-        vec![hard_evidence_for(&issue)],
-        "templated-v1",
-    )
-    .is_ok());
-}
-
-#[test]
 fn e2_jira_target_and_evidence_must_resolve_to_a_stored_issue() {
     let (_d, mut conn) = test_db();
     let stored_issue = store_jira_issue(&conn, "ALM-1");
