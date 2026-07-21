@@ -114,6 +114,19 @@ type ClosedItem = {
   detail: string | null;
 };
 
+type SourceCount = { source: string; count: number };
+
+type Inventory = {
+  sourceObjects: SourceCount[];
+  extractedItems: number;
+  proposals: number;
+  decisions: number;
+  outcomes: number;
+  auditRecords: number;
+  dbPath: string;
+  dbBytes: number;
+};
+
 const PROPOSAL_KIND_LABEL: Record<Proposal["kind"], string> = {
   gmail_reply: "Gmail reply",
   slack_post: "Slack post",
@@ -153,6 +166,9 @@ function App() {
   const [auditLog, setAuditLog] = useState<AuditLog | null>(null);
   const [showAudit, setShowAudit] = useState(false);
   const [closedItems, setClosedItems] = useState<ClosedItem[]>([]);
+  const [inventory, setInventory] = useState<Inventory | null>(null);
+  const [showData, setShowData] = useState(false);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [replanning, setReplanning] = useState(false);
   const [learning, setLearning] = useState<Learning | null>(null);
@@ -280,6 +296,30 @@ function App() {
       setError(String(e));
     }
   }, [showAudit]);
+
+  // Phase 3.6.3: the local data inventory (counts only), fetched on demand.
+  const toggleData = useCallback(async () => {
+    if (showData) {
+      setShowData(false);
+      return;
+    }
+    try {
+      setInventory(await invoke<Inventory>("get_data_inventory"));
+      setExportMsg(null);
+      setShowData(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [showData]);
+
+  const exportData = useCallback(async () => {
+    try {
+      const path = await invoke<string>("export_data_inventory");
+      setExportMsg(`Exported to ${path}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
 
   // Phase 3.6.2: undo — reopen a closed item through the existing audited path.
   const reopen = useCallback(
@@ -834,6 +874,50 @@ function App() {
           </section>
         )}
 
+        {showData && inventory && (
+          <section className="data" aria-label="Local data inventory">
+            <h2 className="data-head">
+              Your data (local)
+              <button className="data-export" onClick={exportData}>
+                Export inventory
+              </button>
+            </h2>
+            <p className="data-meta">
+              {inventory.dbPath} · {Math.round(inventory.dbBytes / 1024)} KB ·
+              nothing leaves this machine
+            </p>
+            <ul className="data-list">
+              {inventory.sourceObjects.map((s) => (
+                <li key={s.source} className="data-row">
+                  <span>{s.source} objects</span>
+                  <span className="data-count">{s.count}</span>
+                </li>
+              ))}
+              <li className="data-row">
+                <span>extracted items</span>
+                <span className="data-count">{inventory.extractedItems}</span>
+              </li>
+              <li className="data-row">
+                <span>proposals</span>
+                <span className="data-count">{inventory.proposals}</span>
+              </li>
+              <li className="data-row">
+                <span>decisions logged</span>
+                <span className="data-count">{inventory.decisions}</span>
+              </li>
+              <li className="data-row">
+                <span>outcomes</span>
+                <span className="data-count">{inventory.outcomes}</span>
+              </li>
+              <li className="data-row">
+                <span>audit records</span>
+                <span className="data-count">{inventory.auditRecords}</span>
+              </li>
+            </ul>
+            {exportMsg && <p className="data-export-msg">{exportMsg}</p>}
+          </section>
+        )}
+
         {showAudit && auditLog && (
           <section className="audit" aria-label="Audit log">
             <h2 className="audit-head">
@@ -872,6 +956,9 @@ function App() {
         {chainStatus && <span className="chain-status"> · {chainStatus}</span>}
         <button className="audit-toggle" onClick={toggleAudit}>
           {showAudit ? "hide audit log" : "view audit log"}
+        </button>
+        <button className="audit-toggle" onClick={toggleData}>
+          {showData ? "hide data" : "view data"}
         </button>
       </footer>
     </div>

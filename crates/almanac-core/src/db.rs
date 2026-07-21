@@ -517,6 +517,71 @@ pub fn get_meta(conn: &Connection, key: &str) -> Result<Option<String>> {
 /// offline UI re-plan can apply J15 self-comment exclusion.
 pub const JIRA_SELF_ACCOUNT_ID: &str = "jira_self_account_id";
 
+/// A count-only inventory of what is stored locally (Phase 3.6.3) — no content,
+/// just how much of each, plus the on-disk location and size.
+#[derive(Debug, Clone)]
+pub struct Inventory {
+    /// (source, count) of stored source objects, e.g. ("gmail", 111).
+    pub source_objects: Vec<(String, i64)>,
+    pub extracted_items: i64,
+    pub proposals: i64,
+    pub decisions: i64,
+    pub outcomes: i64,
+    pub audit_records: i64,
+    pub db_path: String,
+    pub db_bytes: i64,
+}
+
+/// Count what's stored locally, for the data/privacy panel (3.6.3). Read-only;
+/// returns only aggregates — never any message content.
+pub fn data_inventory(conn: &Connection, db_path: &Path) -> Result<Inventory> {
+    let count = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    let mut stmt =
+        conn.prepare("SELECT source, COUNT(*) FROM source_objects GROUP BY source ORDER BY source")?;
+    let source_objects = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let db_bytes = std::fs::metadata(db_path).map(|m| m.len() as i64).unwrap_or(0);
+    Ok(Inventory {
+        source_objects,
+        extracted_items: count("SELECT COUNT(*) FROM extracted_items")?,
+        proposals: count("SELECT COUNT(*) FROM action_proposals")?,
+        decisions: count("SELECT COUNT(*) FROM decision_events")?,
+        outcomes: count("SELECT COUNT(*) FROM item_outcomes")?,
+        audit_records: count("SELECT COUNT(*) FROM audit_records")?,
+        db_path: db_path.display().to_string(),
+        db_bytes,
+    })
+}
+
+/// Serialize the inventory (counts only — no content) to pretty JSON.
+pub fn inventory_json(inv: &Inventory) -> String {
+    let sources: Vec<_> = inv
+        .source_objects
+        .iter()
+        .map(|(s, c)| serde_json::json!({ "source": s, "count": c }))
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "sourceObjects": sources,
+        "extractedItems": inv.extracted_items,
+        "proposals": inv.proposals,
+        "decisions": inv.decisions,
+        "outcomes": inv.outcomes,
+        "auditRecords": inv.audit_records,
+        "dbPath": inv.db_path,
+        "dbBytes": inv.db_bytes,
+    }))
+    .unwrap_or_default()
+}
+
+/// Write the inventory JSON to a local file (3.6.3). Local only — nothing leaves
+/// the device; the payload is aggregate counts, never message content.
+pub fn export_inventory(inv: &Inventory, out_path: &Path) -> Result<()> {
+    std::fs::write(out_path, inventory_json(inv))
+        .with_context(|| format!("writing inventory to {}", out_path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

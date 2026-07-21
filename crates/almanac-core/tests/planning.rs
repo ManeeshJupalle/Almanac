@@ -631,6 +631,33 @@ fn outcome_evidence_must_be_a_stored_source_object() {
     assert!(r.is_err(), "E2: closing evidence must FK-resolve to a stored source object");
 }
 
+// --------------------------------------- data & privacy (3.6.3) ------------
+
+#[test]
+fn data_inventory_counts_and_exports_locally() {
+    let (dir, mut conn) = test_db();
+    seed_full_triple(&conn); // gmail ask + jira issue + git commit
+    queue(&mut conn); // one proposal
+    plan::record_item_decision(&conn, "thread:ALM-3", "user", "dismissed", Utc::now()).unwrap();
+
+    let db_path = dir.path().join("t.db"); // where test_db opened it
+    let inv = almanac_core::db::data_inventory(&conn, &db_path).unwrap();
+    let count = |s: &str| inv.source_objects.iter().find(|(src, _)| src == s).map(|(_, c)| *c);
+    assert_eq!(count("gmail"), Some(1));
+    assert_eq!(count("jira"), Some(1));
+    assert_eq!(count("git"), Some(1));
+    assert_eq!(inv.proposals, 1);
+    assert_eq!(inv.decisions, 1);
+    assert!(inv.audit_records >= 1, "genesis + the queued proposal are counted");
+
+    // Export writes a local JSON file (counts only).
+    let out = dir.path().join("inv.json");
+    almanac_core::db::export_inventory(&inv, &out).unwrap();
+    let written = std::fs::read_to_string(&out).unwrap();
+    assert!(written.contains("\"proposals\": 1"));
+    assert!(written.contains("sourceObjects"));
+}
+
 // --------------------------------------- completed & dismissed (3.6.2) -----
 
 #[test]

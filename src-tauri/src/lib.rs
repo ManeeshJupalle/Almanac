@@ -398,6 +398,72 @@ fn get_audit_log(limit: Option<usize>) -> Result<AuditLogView, String> {
     inner().map_err(|e| format!("{e:#}"))
 }
 
+// ------------------------------------------- data & privacy panel (3.6.3) --
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCountView {
+    pub source: String,
+    pub count: i64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InventoryView {
+    pub source_objects: Vec<SourceCountView>,
+    pub extracted_items: i64,
+    pub proposals: i64,
+    pub decisions: i64,
+    pub outcomes: i64,
+    pub audit_records: i64,
+    pub db_path: String,
+    pub db_bytes: i64,
+}
+
+fn inventory_view(inv: almanac_core::db::Inventory) -> InventoryView {
+    InventoryView {
+        source_objects: inv
+            .source_objects
+            .into_iter()
+            .map(|(source, count)| SourceCountView { source, count })
+            .collect(),
+        extracted_items: inv.extracted_items,
+        proposals: inv.proposals,
+        decisions: inv.decisions,
+        outcomes: inv.outcomes,
+        audit_records: inv.audit_records,
+        db_path: inv.db_path,
+        db_bytes: inv.db_bytes,
+    }
+}
+
+/// A count-only inventory of what's stored locally (3.6.3) — READ ONLY, no content.
+#[tauri::command]
+fn get_data_inventory() -> Result<InventoryView, String> {
+    let inner = || -> anyhow::Result<InventoryView> {
+        let path = almanac_core::init_default_db()?;
+        let conn = almanac_core::db::open(&path)?;
+        Ok(inventory_view(almanac_core::db::data_inventory(&conn, &path)?))
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
+/// Export the inventory (counts only) to a JSON file next to the database.
+/// Returns the file path. Local only — nothing leaves the device.
+#[tauri::command]
+fn export_data_inventory() -> Result<String, String> {
+    let inner = || -> anyhow::Result<String> {
+        let path = almanac_core::init_default_db()?;
+        let conn = almanac_core::db::open(&path)?;
+        let inv = almanac_core::db::data_inventory(&conn, &path)?;
+        let out =
+            path.parent().unwrap_or_else(|| std::path::Path::new(".")).join("almanac-inventory.json");
+        almanac_core::db::export_inventory(&inv, &out)?;
+        Ok(out.display().to_string())
+    };
+    inner().map_err(|e| format!("{e:#}"))
+}
+
 // ---------------------------------------------- prioritized plan (2.3) -----
 
 #[derive(Serialize, Clone)]
@@ -733,7 +799,9 @@ pub fn run() {
             get_learning,
             set_learning_enabled,
             get_audit_log,
-            get_closed_items
+            get_closed_items,
+            get_data_inventory,
+            export_data_inventory
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -62,6 +62,8 @@ fn main() -> ExitCode {
         Some("outcomes") => outcomes_cmd(),
         // Phase 3.6.2: list closed items (done / dismissed / resolved), read-only.
         Some("closed") => closed_cmd(),
+        // Phase 3.6.3: what's stored locally (counts only); `data export` writes it.
+        Some("data") => data_cmd(args.get(1).map(String::as_str) == Some("export")),
         Some("live-briefing") => block_on(async {
             let stored = almanac_core::live_briefing().await?;
             println!(
@@ -116,6 +118,7 @@ fn main() -> ExitCode {
                  \x20 learning                 show what the ranker learned from your decisions\n\
                  \x20 outcomes                 reconcile + show resolved loops (closing evidence)\n\
                  \x20 closed                   list closed items (done / dismissed / resolved)\n\
+                 \x20 data [export]            show local data counts; export writes a JSON file\n\
                  \x20 debug-seed-proposal <gmail-ack|slack-check|jira-comment|jira-transition> [native_id]\n\
                  \x20                          DEV-ONLY: seed a test proposal from a stored\n\
                  \x20                          source object (correlation arrives in 2.2)\n\
@@ -667,6 +670,30 @@ fn outcomes_cmd() -> Result<()> {
     println!("{} resolved item(s):", outcomes.len());
     for o in &outcomes {
         println!("  {} — {} (evidence {}:{}) @ {}", o.item_key, o.detail, o.evidence_source, o.evidence_native_id, o.resolved_at);
+    }
+    Ok(())
+}
+
+/// Phase 3.6.3: show what's stored locally (aggregate counts only — no content);
+/// with `export`, also write it to a JSON file next to the database.
+fn data_cmd(export: bool) -> Result<()> {
+    let path = almanac_core::init_default_db()?;
+    let conn = almanac_core::db::open(&path)?;
+    let inv = almanac_core::db::data_inventory(&conn, &path)?;
+    println!("Local data at {} ({} KB):", inv.db_path, inv.db_bytes / 1024);
+    println!("  source objects:");
+    for (source, count) in &inv.source_objects {
+        println!("    {source:<6} {count}");
+    }
+    println!("  extracted items: {}", inv.extracted_items);
+    println!("  proposals:       {}", inv.proposals);
+    println!("  decisions:       {}", inv.decisions);
+    println!("  outcomes:        {}", inv.outcomes);
+    println!("  audit records:   {}", inv.audit_records);
+    if export {
+        let out = path.parent().unwrap_or_else(|| std::path::Path::new(".")).join("almanac-inventory.json");
+        almanac_core::db::export_inventory(&inv, &out)?;
+        println!("exported to {}", out.display());
     }
     Ok(())
 }
