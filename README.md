@@ -1,10 +1,20 @@
 # Almanac
 
-**A local-first daily-briefing desktop agent.** Almanac connects to your Gmail,
-Google Calendar, and Slack, classifies the day's items on-device, and opens to
-a synthesized "here is your day" briefing — what needs action, what's noise,
-in what order, and *why* — with **every item click-through-grounded to the
-exact message or event it came from**.
+**A local-first daily-briefing and action desktop agent.** Almanac connects
+to your Gmail, Google Calendar, and Slack, classifies the day's items
+on-device, and opens to a synthesized "here is your day" briefing — what
+needs action, what's noise, in what order, and *why* — with **every item
+click-through-grounded to the exact message or event it came from**.
+
+On top of the briefing core, Almanac also **acts — carefully**. It reads Jira
+and your local git commits, correlates asks ↔ issues ↔ commits into work
+threads, drafts evidence-backed replies and Jira updates, and executes them
+**only after your explicit approval**, with every step recorded on a
+hash-chained audit log. It plans your day deterministically, tracks what you
+snooze, finish, or dismiss, learns bounded ranking weights from those
+decisions, and closes loops automatically when the evidence says the work is
+done. See [the action layer](#the-action-layer-propose--approve--execute)
+below.
 
 ![Almanac demo](docs/demo.gif)
 
@@ -85,32 +95,126 @@ Deep links are real: Gmail (`mail.google.com/mail/#all/<id>`), Calendar (the
 event's own `htmlLink`), Slack (workspace archives permalink — verified
 **byte-identical** to Slack's canonical `chat.getPermalink` output).
 
+## The action layer (propose → approve → execute)
+
+Almanac can *do* things — reply in Gmail, post in Slack, comment on or
+transition Jira issues. The same posture as grounding applies: the safety
+properties are enforced, not aspirational, and each has a named invariant
+(spelled out in [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)):
+
+- **A1 — propose-then-approve, always.** The only code path to an `approved`
+  proposal is an explicit user approval, audited in the same transaction.
+  There is no auto-approve flag, config, or route.
+- **A2 — one write chokepoint.** A single executors module is the only code
+  in the workspace that touches write endpoints (`messages/send`,
+  `chat.postMessage`, Jira transition/comment); it independently re-validates
+  `state == approved` from the database at execution time, so a UI bug cannot
+  reach the network. Credentials are scope-isolated: Jira credentials never
+  reach Gmail/Slack code and vice versa, and the GitWatcher holds no network
+  credential at all.
+- **What you approve is what is sent.** `dry_run()` renders the exact final
+  payload — full MIME for Gmail, the exact JSON body for Slack/Jira — and
+  `execute()` sends those bytes verbatim (byte-identity by construction,
+  pinned by tests, and verified against the live endpoints).
+- **E1/E2 — evidence-backed drafts.** A draft asserting work was done must
+  carry at least one Tier-Hard evidence reference (a real commit or Jira
+  issue) — soft-only factual proposals are refused at construction — and
+  every evidence ref must resolve to a stored source object (composite FK +
+  INNER JOIN: the v1 grounding pattern, reused).
+- **L1 — audit-before-acknowledge.** Every state transition appends to a
+  hash-chained, append-only audit log in the same SQLite transaction, and an
+  `execution_started` record hashing the exact outbound bytes commits
+  *before* any network send. An action that cannot be audited does not
+  execute. Honest threat model: the chain makes tampering with the local DB
+  *evident* (verified end-to-end by `verify-chain`); it is not a
+  cryptographic notary — there is no external anchor.
+- **Drafts are templated, not generated.** Applying the v1 lesson (a small
+  model orders well but garbles prose), drafts are fixed templates whose
+  slots are typed, validated fields (commit SHAs, links, ticket keys). Free
+  text from email/Slack bodies is never interpolated into a draft body — so
+  "ignore previous instructions" arriving in an email has no path into an
+  outward message through this backend.
+
+### Correlation: asks ↔ issues ↔ commits
+
+The GitWatcher reads configured local repos (no network, no credential) and
+stores commits as Tier-Hard evidence. A deterministic correlator binds
+Gmail/Slack asks that mention an issue key ↔ the Jira issue ↔ the commits
+into **work threads**, and queues "work done" reply proposals through the
+approval machinery, showing its confidence and basis in the queue. Matching
+is word-boundary-exact (`ALM-1` matches; `PSALM-1` and `ALM-10` don't), and
+Almanac's own Jira comments are excluded from evidence so it can't cite
+itself.
+
+### Planning, learning, outcomes
+
+- **Deterministic prioritization.** The plan ("do now / by EOD / can wait")
+  is an integer-weighted score over named factors (actionability, deadline
+  proximity, hard evidence, classifier kind, staleness, priority sender)
+  with a templated per-item rationale and a total stable sort — same inputs,
+  same plan. Re-planning is idempotent (a rejected proposal is never
+  resurrected; new evidence on the same ask + issue doesn't mint a
+  duplicate) and each re-plan cycle is itself an audited event.
+- **Plan state across days.** Snooze / done / dismiss per item, each an
+  audited transition; snoozed items return when due; state is applied at
+  read time, so viewing the plan never writes.
+- **Decision capture → learning flywheel.** Every approve / reject / execute
+  / snooze / done / dismiss is logged with the item's factor vector at
+  decision time. From that log the ranker derives per-factor multipliers
+  that are **bounded** (0.5×–1.5×; deadlines are never scaled),
+  **explainable** (each adjustment carries a plain-English rationale, shown
+  in the UI), gated on a minimum sample count, and **resettable** (one
+  toggle restores base weights). Weights are derived on demand from the log
+  — deterministic, no hidden model state.
+- **Outcome tracking.** When an item Almanac acted on reaches a done status
+  in Jira, the loop closes with that issue recorded as the closing evidence
+  — audited, idempotent, and read-only toward external services.
+
+### Seeing what it did
+
+Transparency panels back all of the above: an audit-log viewer (chain-intact
+badge + recent records, every event type surfaced), a completed-and-dismissed
+view whose Reopen button is a normal audited transition (undo goes through
+the same single path, on the chain), and a data & privacy inventory showing
+exactly what is stored locally (per-source counts, DB size) with a one-click
+JSON export.
+
 ## Architecture
 
 ```
-+------------------------------------------------------------+
-|  Tauri shell (React/Vite)  — briefing ledger, click-through |
-|  source status; consumes string DTOs via IPC only           |
-+---------------------------|--------------------------------+
++--------------------------------------------------------------+
+|  Tauri shell (React/Vite) — briefing, plan, approval queue,   |
+|  audit log, learning & data panels; string DTOs via IPC only  |
++---------------------------|----------------------------------+
                             | Tauri IPC
-+---------------------------v--------------------------------+
-|  almanac-core (headless Rust; runs & tests without the UI)  |
-|                                                             |
-|  SourceAdapter trait          Extraction        Synthesis   |
-|   - GmailAdapter        -->    rules +     -->  Backend     |
-|   - CalendarAdapter            MiniLM           trait       |
-|   - SlackAdapter               embeddings       (local Qwen)|
-|        |                          |                |        |
-|        v                          v                v        |
-|  encrypted token store   SQLite: source_objects | extracted |
-|  (DPAPI)                 _items | briefings  (FK-grounded)  |
-+-------------------------------------------------------------+
++---------------------------v----------------------------------+
+|  almanac-core (headless Rust; runs & tests without the UI)    |
+|                                                               |
+|  SourceAdapter trait          Extraction        Synthesis     |
+|   - GmailAdapter        -->    rules +     -->  Backend       |
+|   - CalendarAdapter            MiniLM           trait         |
+|   - SlackAdapter               embeddings       (local Qwen)  |
+|   - JiraAdapter                                               |
+|  GitWatcher (local commits — network- and credential-free)    |
+|        |                                                      |
+|        v                                                      |
+|  Correlator ---> Prioritizer ---> ActionProposals ---> act    |
+|  (asks<->issues  (deterministic,  (approval queue)  executors |
+|   <->commits)     learned weights)         hash-chained audit |
+|        |                                                      |
+|        v                                                      |
+|  encrypted token store (DPAPI)                                |
+|  SQLite (FK-grounded): source_objects | extracted_items |     |
+|  briefings | proposals | audit_log | plan state | decisions | |
+|  outcomes                                                     |
++---------------------------------------------------------------+
 ```
 
 - **Payload-first**: adapters were modeled against captured real API
   responses (committed, redacted, in `/fixtures`), not docs —
-  [`PAYLOAD_CORRECTIONS.md`](PAYLOAD_CORRECTIONS.md) documents 34 places the
-  real payloads differ from what the docs imply.
+  [`PAYLOAD_CORRECTIONS.md`](PAYLOAD_CORRECTIONS.md) documents 56 places the
+  real payloads differ from what the docs imply (34 across Gmail, Calendar,
+  and Slack; 15 more for Jira; 7 for `git log` itself).
 - **Hybrid classifier**: high-precision rules first (calendar events,
   bulk-mail headers, Slack system messages, explicit ask/promise patterns),
   MiniLM prototype-similarity for the undecided rest; low-confidence items are
@@ -228,12 +332,21 @@ Credentials (bring your own — nothing is provisioned for you):
    id/secret.
 3. `Copy-Item .env.example .env` (PowerShell; `cp` on macOS/Linux) and fill in
    the Slack values.
+4. **Jira** (optional — feeds the action layer): create an API token at
+   id.atlassian.com and fill `JIRA_BASE_URL` / `JIRA_EMAIL` /
+   `JIRA_API_TOKEN` in `.env`. `jira-auth` (below) validates it live and
+   stores it DPAPI-encrypted; the plaintext `.env` value can be blanked
+   afterward.
+5. **GitWatcher** (optional — commit evidence): set `ALMANAC_GIT_REPOS` in
+   `.env` to semicolon-separated local repo paths. It shells out to local
+   `git` only and holds no network credential.
 
 First run:
 
 ```sh
 cargo run -p fixture-capture -- google-auth   # one-time browser consent
 cargo run -p fixture-capture -- slack-auth    # one-time browser consent
+cargo run -p fixture-capture -- jira-auth     # optional: validate + encrypt the Jira token
 cargo run -p almanac-core -- --self-check     # prints "core ok"
 cargo test -p almanac-core                    # model tests self-skip if models absent
 npm run tauri dev                             # open the app → Compose today's briefing
@@ -258,27 +371,47 @@ release by design.
 The engine runs and is tested without the UI:
 
 ```sh
+# briefing pipeline
 cargo run -p almanac-core -- --self-check       # db + migrations sanity
 cargo run -p almanac-core -- extract-fixtures   # offline: fixtures → classified items (prints network probe)
 cargo run -p almanac-core -- e2e-fixtures       # offline: fixtures → extraction → validated briefing
 cargo run -p almanac-core -- live-briefing      # full live chain, prints the briefing
 cargo run -p almanac-core -- refresh-google     # forced token refresh with fingerprint evidence
+
+# action layer
+cargo run -p almanac-core -- fetch-jira         # fetch + store recent Jira issues as source objects
+cargo run -p almanac-core -- git-watch          # local commits → Tier-Hard evidence (offline)
+cargo run -p almanac-core -- correlate          # bind asks↔issues↔commits, queue proposals (read-only)
+cargo run -p almanac-core -- list-proposals     # approval queue + audit tail
+cargo run -p almanac-core -- plan               # prioritized plan (do now / by EOD / can wait)
+cargo run -p almanac-core -- replan             # one audited, idempotent re-plan cycle
+cargo run -p almanac-core -- decisions          # decision log, with factors at decision time
+cargo run -p almanac-core -- learning           # what the ranker learned from you, and why
+cargo run -p almanac-core -- outcomes           # reconcile + list resolved loops (closing evidence)
+cargo run -p almanac-core -- closed             # done / dismissed / resolved items
+cargo run -p almanac-core -- audit-log          # browse the hash chain (chain-intact + records)
+cargo run -p almanac-core -- verify-chain       # walk + verify the full audit chain
+cargo run -p almanac-core -- data export        # local data counts → JSON inventory export
 ```
 
 ## Stack
 
 | Layer | Choice |
 |---|---|
-| Core engine | Rust, headless crate (`almanac-core`), 54 tests |
+| Core engine | Rust, headless crate (`almanac-core`), 142 tests |
 | Desktop shell | Tauri v2 (thin IPC client, no engine logic; strict CSP, scoped opener) |
 | UI | React + Vite, hand-rolled CSS |
 | Store | SQLite (rusqlite, embedded migrations, FK-grounded) |
 | Extraction | all-MiniLM-L6-v2 ONNX via tract-onnx (pure Rust) |
 | Synthesis | Qwen2.5-0.5B-Instruct GGUF via candle (pure Rust) |
+| Actions | propose → approve → execute; SHA-256 hash-chained audit; templated drafts |
 | Tokens | Windows DPAPI, encrypted at rest |
 | CI | Linux + Windows (DPAPI) test jobs, workspace build, `cargo`/`npm audit` |
 
 Built in six phases (scaffold → payload-first fixtures → adapters →
-extraction → synthesis → UI → ship), then hardened against a full
-principal-engineer audit. `PAYLOAD_CORRECTIONS.md` and the honest misses above
-are part of the deliverable, not an apology.
+extraction → synthesis → UI → ship), hardened against a full
+principal-engineer audit, then extended with the action layer (propose →
+approve → execute over a hash-chained audit log, Jira + git correlation,
+deterministic planning, a bounded learning loop, and outcome tracking).
+`PAYLOAD_CORRECTIONS.md` and the honest misses above are part of the
+deliverable, not an apology.
