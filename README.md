@@ -302,8 +302,9 @@ Things that don't work as well as the demo suggests, measured, not vibes:
 
 ## Setup (honest version)
 
-Windows-first (token encryption is DPAPI). Prereqs: Rust (MSVC toolchain),
-Node 18+.
+Windows-first (token encryption is DPAPI). Prereqs: Rust stable **1.91 or
+newer** (the MSVC toolchain on Windows; `tract` sets the floor, and `Cargo.lock`
+pins a dependency needing the 2024 edition), Node 18+.
 
 ```powershell
 git clone https://github.com/ManeeshJupalle/Almanac.git; cd Almanac
@@ -319,6 +320,13 @@ curl.exe -L -o models\qwen2.5-0.5b-instruct\tokenizer.json https://huggingface.c
 
 (On macOS/Linux use `mkdir -p models/minilm models/qwen2.5-0.5b-instruct` and
 `curl` — but note token encryption is Windows-only for now; see honest misses.)
+
+On a bare Linux box the engine needs a C++ toolchain whose `libstdc++` headers
+match the GCC installation your `c++` driver selects (`esaxx-rs`, pulled in
+under `tract`, fails on `<cstdint>` otherwise), plus the Tauri system deps if
+you build the shell. [`.cursor/install.sh`](.cursor/install.sh) is the
+executable version of that list — it provisions cloud agents and works as a
+setup script for any Ubuntu checkout.
 
 Credentials (bring your own — nothing is provisioned for you):
 
