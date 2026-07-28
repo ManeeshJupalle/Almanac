@@ -29,8 +29,10 @@ sudo apt-get update -qq
 # Tauri's Linux system deps — kept in step with the workspace-build job in
 # .github/workflows/ci.yml. Needed to compile src-tauri (the shell lib), not
 # almanac-core alone.
-log "Installing Tauri Linux system dependencies"
+log "Installing build and Tauri Linux system dependencies"
 sudo apt-get install -y -qq --no-install-recommends \
+  build-essential \
+  pkg-config \
   libwebkit2gtk-4.1-dev \
   libgtk-3-dev \
   librsvg2-dev \
@@ -51,8 +53,10 @@ log "Checking the C++ toolchain (esaxx-rs needs libstdc++ headers + .so)"
 if cxx_probe; then
   echo "c++ already compiles and links against libstdc++"
 else
+  # `|| true`: reach the explicit error below rather than aborting on set -e if
+  # the driver is missing or reports nothing (i.e. it is gcc, not clang).
   selected=$(c++ -v -E -x c++ /dev/null 2>&1 |
-    sed -n 's|.*Selected GCC installation: .*/\([0-9][0-9]*\)$|\1|p' | tail -1)
+    sed -n 's|.*Selected GCC installation: .*/\([0-9][0-9]*\)$|\1|p' | tail -1 || true)
   # Fallback covers a `c++` that reports no selection (i.e. it is gcc, not
   # clang) and any future image whose GCC major we don't recognise.
   for ver in ${selected:-} 14 13; do
